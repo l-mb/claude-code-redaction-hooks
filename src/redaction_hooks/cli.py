@@ -34,6 +34,50 @@ from .hooks import run_hook
 from .matcher import PatternMatcher
 
 
+class _FileCheckResult:
+    """Result of checking a single file."""
+
+    __slots__ = ("blocked", "matched", "error", "messages")
+
+    def __init__(self) -> None:
+        self.blocked = False
+        self.matched = False
+        self.error = False
+        self.messages: list[str] = []
+
+
+def _check_single_file(file_path: Path, matcher: PatternMatcher, quiet: bool) -> _FileCheckResult:
+    """Check a single file against rules, return result."""
+    result = _FileCheckResult()
+
+    if not file_path.exists():
+        result.error = True
+        result.messages.append(f"Error: File not found: {file_path}")
+        return result
+
+    try:
+        content = file_path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return result  # Skip binary/unreadable files
+
+    matches = matcher.scan(content, "tool")
+    if not matches:
+        return result
+
+    result.matched = True
+    scan_result = apply_actions(content, matches, Path.cwd())
+
+    if scan_result.block_reasons:
+        result.blocked = True
+        result.messages.append(f"{file_path}:")
+        for reason in scan_result.block_reasons:
+            result.messages.append(f"  BLOCKED: {reason}")
+    elif not quiet:
+        result.messages.append(f"{file_path}: {len(matches)} redaction match(es)")
+
+    return result
+
+
 def cmd_hook(args: argparse.Namespace) -> int:
     """Run as Claude Code hook."""
     return run_hook()
@@ -91,6 +135,17 @@ def cmd_edit(args: argparse.Namespace) -> int:
     return subprocess.call([editor, str(path)])
 
 
+def _get_check_exit_code(blocked: bool, error: bool, matched: bool, quiet: bool) -> int:
+    """Determine exit code and print message if needed."""
+    if blocked:
+        return 2
+    if error:
+        return 1
+    if not matched and not quiet:
+        print("No matches found")
+    return 0
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Scan file(s) against rules."""
     rules = load_rules_file(Path(args.rules)) if args.rules else load_rules()
@@ -101,44 +156,17 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 0
 
     matcher = PatternMatcher(rules)
-    any_blocked = False
-    any_matched = False
-    any_error = False
+    any_blocked, any_matched, any_error = False, False, False
 
     for file_arg in args.files:
-        file_path = Path(file_arg)
-        if not file_path.exists():
-            print(f"Error: File not found: {file_path}", file=sys.stderr)
-            any_error = True
-            continue
+        result = _check_single_file(Path(file_arg), matcher, args.quiet)
+        any_blocked |= result.blocked
+        any_matched |= result.matched
+        any_error |= result.error
+        for msg in result.messages:
+            print(msg, file=sys.stderr if result.error else sys.stdout)
 
-        try:
-            content = file_path.read_text()
-        except (OSError, UnicodeDecodeError):
-            continue  # Skip binary/unreadable files
-
-        matches = matcher.scan(content, "tool")
-        if not matches:
-            continue
-
-        any_matched = True
-        result = apply_actions(content, matches, Path.cwd())
-
-        if result.block_reasons:
-            any_blocked = True
-            print(f"{file_path}:")
-            for reason in result.block_reasons:
-                print(f"  BLOCKED: {reason}")
-        elif not args.quiet:
-            print(f"{file_path}: {len(matches)} redaction match(es)")
-
-    if any_blocked:
-        return 2
-    if any_error:
-        return 1
-    if not any_matched and not args.quiet:
-        print("No matches found")
-    return 0
+    return _get_check_exit_code(any_blocked, any_error, any_matched, args.quiet)
 
 
 def cmd_claude_setup(args: argparse.Namespace) -> int:

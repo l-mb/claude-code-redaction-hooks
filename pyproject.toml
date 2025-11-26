@@ -18,6 +18,11 @@ dev = [
     "basedpyright>=1.0",
     "pre-commit>=3.0",
     "types-PyYAML",
+    "vulture>=2.14",
+    "pylint>=4.0.3",
+    "radon>=6.0",
+    "lizard>=1.17",
+    "xenon>=0.9",
 ]
 
 [build-system]
