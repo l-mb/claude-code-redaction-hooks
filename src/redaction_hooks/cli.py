@@ -122,6 +122,26 @@ def cmd_secret_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_validation(path: Path) -> int:
+    """Run validation on a rules file, print errors, return exit code."""
+    from .config import validate_rules_file
+
+    errors = validate_rules_file(path)
+    if errors:
+        print(f"Validation errors in {path}:", file=sys.stderr)
+        for err in errors:
+            print(f"  {err}", file=sys.stderr)
+        return 1
+    print(f"{path}: OK")
+    return 0
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    """Validate rules file syntax."""
+    path = Path(args.rules) if args.rules else get_rules_path(global_=args.glob)
+    return _run_validation(path)
+
+
 def cmd_edit(args: argparse.Namespace) -> int:
     """Open rules file in editor."""
     path = get_rules_path(global_=args.glob)
@@ -132,7 +152,11 @@ def cmd_edit(args: argparse.Namespace) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("rules: []\n")
 
-    return subprocess.call([editor, str(path)])
+    result = subprocess.call([editor, str(path)])
+    if result != 0:
+        return result
+
+    return _run_validation(path)
 
 
 def _get_check_exit_code(blocked: bool, error: bool, matched: bool, quiet: bool) -> int:
@@ -236,6 +260,11 @@ def main() -> int | NoReturn:
     edit_parser = subparsers.add_parser("edit", help="Open rules file in $EDITOR")
     edit_parser.add_argument("--global", dest="glob", action="store_true", help="Edit global rules")
 
+    # validate subcommand
+    validate_parser = subparsers.add_parser("validate", help="Validate rules file syntax")
+    validate_parser.add_argument("--global", dest="glob", action="store_true", help="Global rules")
+    validate_parser.add_argument("--rules", help="Custom rules file")
+
     # check subcommand
     check_parser = subparsers.add_parser("check", help="Scan files against rules")
     check_parser.add_argument("files", nargs="+", help="Files to scan")
@@ -259,6 +288,8 @@ def main() -> int | NoReturn:
             return cmd_secret_list(args)
     if args.command == "edit":
         return cmd_edit(args)
+    if args.command == "validate":
+        return cmd_validate(args)
     if args.command == "check":
         return cmd_check(args)
     if args.command == "claude-setup":

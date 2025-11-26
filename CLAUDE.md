@@ -24,7 +24,8 @@ uv run pytest -k test_name # single test
 redact hook                      # Run as Claude Code hook (reads JSON from stdin)
 redact secret add --id ID        # Add hashed secret (reads from stdin or $REDACT_SECRET)
 redact secret list               # List hashed rules
-redact edit                      # Open rules in $EDITOR
+redact edit                      # Open rules in $EDITOR (validates after)
+redact validate                  # Validate rules file syntax
 redact check <file>...           # Scan files against rules
 redact check --rules FILE        # Use custom rules file
 redact check -q                  # Quiet mode (only output blocked)

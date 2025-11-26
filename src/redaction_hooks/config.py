@@ -21,6 +21,9 @@ import yaml
 
 from .models import Action, Rule, Target
 
+VALID_ACTIONS = {"block", "redact"}
+VALID_TARGETS = {"llm", "tool", "both"}
+
 PROJECT_RULES_FILE = ".redaction_rules"
 GLOBAL_RULES_DIR = Path.home() / ".claude"
 GLOBAL_RULES_FILE = GLOBAL_RULES_DIR / ".redaction_rules"
@@ -139,3 +142,78 @@ def add_hashed_rule(
     rules.append(new_rule)
     save_rules_file(path, rules)
     return new_rule
+
+
+def _validate_rule(rule: dict[str, Any], index: int, seen_ids: set[str]) -> list[str]:
+    """Validate a single rule dict, return list of errors."""
+    import re
+
+    errors: list[str] = []
+    prefix = f"Rule {index + 1}"
+
+    if "id" not in rule:
+        errors.append(f"{prefix}: missing required field 'id'")
+    else:
+        rule_id = rule["id"]
+        prefix = f"Rule '{rule_id}'"
+        if rule_id in seen_ids:
+            errors.append(f"{prefix}: duplicate id")
+        seen_ids.add(rule_id)
+
+    if "pattern" not in rule:
+        errors.append(f"{prefix}: missing required field 'pattern'")
+    elif rule.get("is_regex", True) and not rule.get("hashed", False):
+        try:
+            re.compile(rule["pattern"])
+        except re.error as e:
+            errors.append(f"{prefix}: invalid regex pattern: {e}")
+
+    if "hash_extractor" in rule:
+        try:
+            re.compile(rule["hash_extractor"])
+        except re.error as e:
+            errors.append(f"{prefix}: invalid hash_extractor regex: {e}")
+
+    if "action" in rule and rule["action"] not in VALID_ACTIONS:
+        valid = ", ".join(VALID_ACTIONS)
+        errors.append(f"{prefix}: invalid action '{rule['action']}' (must be: {valid})")
+
+    if "target" in rule and rule["target"] not in VALID_TARGETS:
+        valid = ", ".join(VALID_TARGETS)
+        errors.append(f"{prefix}: invalid target '{rule['target']}' (must be: {valid})")
+
+    return errors
+
+
+def validate_rules_file(path: Path) -> list[str]:
+    """Validate a rules file, return list of error messages (empty if valid)."""
+    if not path.exists():
+        return []
+
+    try:
+        with path.open() as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        return [f"YAML syntax error: {e}"]
+
+    if data is None:
+        return []
+
+    if not isinstance(data, dict):
+        return ["Invalid format: expected a mapping with 'rules' key"]
+
+    if "rules" not in data:
+        return []
+
+    if not isinstance(data["rules"], list):
+        return ["Invalid format: 'rules' must be a list"]
+
+    errors: list[str] = []
+    seen_ids: set[str] = set()
+    for i, rule in enumerate(data["rules"]):
+        if not isinstance(rule, dict):
+            errors.append(f"Rule {i + 1}: must be a mapping")
+            continue
+        errors.extend(_validate_rule(rule, i, seen_ids))
+
+    return errors

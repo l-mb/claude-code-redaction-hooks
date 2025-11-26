@@ -137,3 +137,115 @@ def test_add_hashed_rule_replaces_existing(tmp_path: Path) -> None:
     loaded = load_rules_file(tmp_path / ".redaction_rules")
     assert len(loaded) == 1
     assert loaded[0].pattern == hash_text("Second")
+
+
+def test_validate_valid_rules(tmp_rules_file: Path) -> None:
+    """Test validation passes for valid rules."""
+    from redaction_hooks.config import validate_rules_file
+
+    tmp_rules_file.write_text("""
+rules:
+  - id: test-rule
+    pattern: "secret.*"
+    action: block
+""")
+    errors = validate_rules_file(tmp_rules_file)
+    assert errors == []
+
+
+def test_validate_missing_file(tmp_path: Path) -> None:
+    """Test validation returns empty for non-existent file."""
+    from redaction_hooks.config import validate_rules_file
+
+    errors = validate_rules_file(tmp_path / "nonexistent")
+    assert errors == []
+
+
+def test_validate_invalid_yaml(tmp_rules_file: Path) -> None:
+    """Test validation catches YAML syntax errors."""
+    from redaction_hooks.config import validate_rules_file
+
+    tmp_rules_file.write_text("rules: [invalid yaml")
+    errors = validate_rules_file(tmp_rules_file)
+    assert len(errors) == 1
+    assert "YAML syntax error" in errors[0]
+
+
+def test_validate_missing_id(tmp_rules_file: Path) -> None:
+    """Test validation catches missing id field."""
+    from redaction_hooks.config import validate_rules_file
+
+    tmp_rules_file.write_text("""
+rules:
+  - pattern: "test"
+""")
+    errors = validate_rules_file(tmp_rules_file)
+    assert any("missing required field 'id'" in e for e in errors)
+
+
+def test_validate_missing_pattern(tmp_rules_file: Path) -> None:
+    """Test validation catches missing pattern field."""
+    from redaction_hooks.config import validate_rules_file
+
+    tmp_rules_file.write_text("""
+rules:
+  - id: test
+""")
+    errors = validate_rules_file(tmp_rules_file)
+    assert any("missing required field 'pattern'" in e for e in errors)
+
+
+def test_validate_invalid_regex(tmp_rules_file: Path) -> None:
+    """Test validation catches invalid regex patterns."""
+    from redaction_hooks.config import validate_rules_file
+
+    tmp_rules_file.write_text("""
+rules:
+  - id: test
+    pattern: "[invalid"
+""")
+    errors = validate_rules_file(tmp_rules_file)
+    assert any("invalid regex pattern" in e for e in errors)
+
+
+def test_validate_invalid_action(tmp_rules_file: Path) -> None:
+    """Test validation catches invalid action values."""
+    from redaction_hooks.config import validate_rules_file
+
+    tmp_rules_file.write_text("""
+rules:
+  - id: test
+    pattern: "test"
+    action: invalid
+""")
+    errors = validate_rules_file(tmp_rules_file)
+    assert any("invalid action" in e for e in errors)
+
+
+def test_validate_invalid_target(tmp_rules_file: Path) -> None:
+    """Test validation catches invalid target values."""
+    from redaction_hooks.config import validate_rules_file
+
+    tmp_rules_file.write_text("""
+rules:
+  - id: test
+    pattern: "test"
+    target: invalid
+""")
+    errors = validate_rules_file(tmp_rules_file)
+    assert any("invalid target" in e for e in errors)
+
+
+def test_validate_duplicate_ids(tmp_rules_file: Path) -> None:
+    """Test validation catches duplicate rule ids."""
+    from redaction_hooks.config import validate_rules_file
+
+    tmp_rules_file.write_text("""
+rules:
+  - id: dupe
+    pattern: "test1"
+  - id: dupe
+    pattern: "test2"
+""")
+    errors = validate_rules_file(tmp_rules_file)
+    assert any("duplicate id" in e for e in errors)

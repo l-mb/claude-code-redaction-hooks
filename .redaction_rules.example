@@ -21,6 +21,12 @@ rules:
     action: block
     description: GitHub Personal Access Token
 
+  - id: static-string
+    pattern: 'MAGICSTRING'
+    action: block
+    is_regex: false
+    description: Static string to block example
+
   # Redact email addresses in LLM prompts
   - id: email-pii
     pattern: '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'

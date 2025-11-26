@@ -15,8 +15,12 @@ Due to limitations in Claude Code's hook mechanism, for now:
 ## Install
 
 ```bash
-uv pip install -e .
+# User-wide install (recommended)
+uv tool install --reinstall .
 redact claude-setup        # configure hooks in .claude/settings.json
+
+# Or development install (venv only)
+uv pip install -e .
 ```
 
 ## Usage
