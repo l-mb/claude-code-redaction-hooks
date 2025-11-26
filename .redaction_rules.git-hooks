@@ -1,0 +1,20 @@
+rules:
+  - id: aws-access-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    description: AWS Access Key ID
+
+  - id: openai-key
+    pattern: 'sk-[a-zA-Z0-9]{32,}'
+    action: block
+    description: OpenAI API Key
+
+  - id: github-token
+    pattern: 'ghp_[a-zA-Z0-9]{36,}'
+    action: block
+    description: GitHub Personal Access Token
+
+  - id: hardcoded-password
+    pattern: 'password\s*=\s*["\x27][^"\x27]+["\x27]'
+    action: block
+    description: Hardcoded password assignment
