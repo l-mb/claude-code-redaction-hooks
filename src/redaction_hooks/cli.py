@@ -217,6 +217,12 @@ def cmd_claude_setup(args: argparse.Namespace) -> int:
                 "hooks": [{"type": "command", "command": "redact hook"}],
             }
         ],
+        "PostToolUse": [
+            {
+                "matcher": "Read|Bash|Grep|Glob|WebFetch",
+                "hooks": [{"type": "command", "command": "redact hook"}],
+            }
+        ],
         "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "redact hook"}]}],
     }
 

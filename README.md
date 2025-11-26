@@ -6,11 +6,15 @@ Redaction is consistent (tracked via a mapping file). Reversing is not currently
 
 ## Limitations
 
-Due to limitations in Claude Code's hook mechanism, for now:
+Due to limitations in Claude Code's hook mechanism:
 
-- `redact` action only fully works for `target: tool` (`PreToolUse` supports `updatedInput`)
-- `redact` with `target: llm` warns and allows (`UserPromptSubmit` cannot modify prompts)
-- No reversible redaction (un-redacting responses not implemented, cannot modify responses via hooks)
+| Hook | block | redact |
+|------|-------|--------|
+| PreToolUse | Y | Y (tool input modified) |
+| PostToolUse | Y | N warns only (cannot modify output) |
+| UserPromptSubmit | Y | N warns only (cannot modify prompt) |
+
+No reversible redaction (un-redacting responses not implemented).
 
 ## Install
 

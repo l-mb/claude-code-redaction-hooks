@@ -202,3 +202,78 @@ rules:
     assert output["continue"] is True
     assert "Warning" in stderr.getvalue()
     assert "email-redact" in stderr.getvalue()
+
+
+def test_post_tool_use_blocks_secret_in_read_output(rules_dir: Path) -> None:
+    """Test PostToolUse blocks AWS key in Read tool output."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_response": {"content": "aws_key = AKIAIOSFODNN7EXAMPLE"},
+    }
+    code, output = capture_output(handle_post_tool_use, data, rules_dir)
+    assert code == 2
+    assert output["decision"] == "block"
+    assert "aws-key" in output["reason"]
+
+
+def test_post_tool_use_blocks_secret_in_bash_output(rules_dir: Path) -> None:
+    """Test PostToolUse blocks AWS key in Bash tool output."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_response": {"stdout": "AWS_KEY=AKIAIOSFODNN7EXAMPLE"},
+    }
+    code, output = capture_output(handle_post_tool_use, data, rules_dir)
+    assert code == 2
+    assert output["decision"] == "block"
+
+
+def test_post_tool_use_allows_clean_output(rules_dir: Path) -> None:
+    """Test PostToolUse allows clean tool output."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_response": {"content": "clean content here"},
+    }
+    code, output = capture_output(handle_post_tool_use, data, rules_dir)
+    assert code == 0
+    assert output["continue"] is True
+
+
+def test_post_tool_use_redact_warns(rules_dir: Path) -> None:
+    """Test PostToolUse warns for redact rules (cannot modify output)."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_response": {"content": "contact: alice@secret.com"},
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_post_tool_use, data, rules_dir)
+    assert code == 0
+    assert output["continue"] is True
+    assert "Warning" in stderr.getvalue()
+    assert "email" in stderr.getvalue()
+
+
+def test_run_hook_dispatches_post_tool_use(rules_dir: Path) -> None:
+    """Test run_hook dispatches to PostToolUse handler."""
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_response": {"content": "clean"},
+    }
+    stdin = io.StringIO(json.dumps(data))
+    stdout = io.StringIO()
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+        code = run_hook(rules_dir)
+    assert code == 0
