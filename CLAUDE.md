@@ -59,5 +59,6 @@ Rules in `.redaction_rules` (YAML):
 - `action`: `block` or `redact`
 - `replacement`: For redact - literal string, `ip`, `email`, or `hostname`
 - `target`: `llm`, `tool`, or `both` (default)
+- `tool`: Filter to specific tool name (e.g., `Bash`, `Write`), omit for all tools
 
 See `.redaction_rules.example` for examples.

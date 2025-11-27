@@ -127,7 +127,7 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
         return 0
 
     matcher = PatternMatcher(rules)
-    matches = matcher.scan(content, "tool")
+    matches = matcher.scan(content, "tool", tool_name)
     if not matches:
         json.dump({"continue": True}, sys.stdout)
         return 0
@@ -209,7 +209,7 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
         return 0
 
     matcher = PatternMatcher(rules)
-    matches = matcher.scan(content, "tool")
+    matches = matcher.scan(content, "tool", tool_name)
     if not matches:
         json.dump({"continue": True}, sys.stdout)
         return 0

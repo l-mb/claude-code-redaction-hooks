@@ -34,6 +34,7 @@ class Rule:
     action: Action = "block"
     replacement: Replacement | None = None
     target: Target = "both"
+    tool: str | None = None  # Filter to specific tool (e.g., "Bash"), None = all tools
     description: str = ""
 
 

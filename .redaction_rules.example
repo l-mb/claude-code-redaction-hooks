@@ -43,6 +43,19 @@ rules:
     target: llm
     description: IPv4 addresses
 
+  # Block dangerous git flags (Bash commands only)
+  - id: git-no-verify
+    pattern: '--no-verify'
+    action: block
+    tool: Bash
+    description: Bypasses pre-commit hooks
+
+  - id: git-push
+    pattern: 'push'
+    action: block
+    tool: Bash
+    description: git push requires mandatory human review
+
   # Example hashed secret (add with: echo "YourSecret" | redact secret add --id my-secret)
   # - id: my-secret
   #   pattern: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

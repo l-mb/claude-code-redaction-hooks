@@ -51,11 +51,21 @@ class PatternMatcher:
             self._compiled[key] = re.compile(rule.hash_extractor)
         return self._compiled[key]
 
-    def scan(self, text: str, target: Literal["llm", "tool"]) -> list[Match]:
-        """Scan text and return all matches for applicable rules."""
+    def scan(
+        self, text: str, target: Literal["llm", "tool"], tool_name: str | None = None
+    ) -> list[Match]:
+        """Scan text and return all matches for applicable rules.
+
+        Args:
+            text: Content to scan
+            target: "llm" for prompts, "tool" for tool inputs/outputs
+            tool_name: Filter to rules matching this tool (None = all rules)
+        """
         matches: list[Match] = []
         for rule in self.rules:
             if rule.target != "both" and rule.target != target:
+                continue
+            if rule.tool is not None and rule.tool != tool_name:
                 continue
             if rule.hashed:
                 matches.extend(self._match_hashed(rule, text))

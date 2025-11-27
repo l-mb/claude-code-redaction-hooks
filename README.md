@@ -53,6 +53,13 @@ rules:
     action: redact
     replacement: email         # or: ip, hostname, or literal string
     target: tool               # or: llm, both (default)
+
+  # Block dangerous git flags (Bash only)
+  - id: no-verify
+    pattern: '--no-verify'
+    action: block
+    tool: Bash                 # only applies to Bash commands
+    description: Bypasses pre-commit hooks
 ```
 
 ### Hashed secrets

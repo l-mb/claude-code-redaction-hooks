@@ -100,3 +100,50 @@ def test_no_matches() -> None:
     matcher = PatternMatcher([rule])
     matches = matcher.scan("no secrets here", "llm")
     assert len(matches) == 0
+
+
+def test_tool_filter_matches_specific_tool() -> None:
+    """Test that tool filter only matches specified tool."""
+    rule = Rule(id="no-verify", pattern="--no-verify", tool="Bash")
+    matcher = PatternMatcher([rule])
+    assert len(matcher.scan("git commit --no-verify", "tool", "Bash")) == 1
+    assert len(matcher.scan("git commit --no-verify", "tool", "Write")) == 0
+    assert len(matcher.scan("git commit --no-verify", "tool", None)) == 0
+
+
+def test_tool_filter_none_matches_all() -> None:
+    """Test that tool=None matches all tools."""
+    rule = Rule(id="secret", pattern="secret", tool=None)
+    matcher = PatternMatcher([rule])
+    assert len(matcher.scan("secret", "tool", "Bash")) == 1
+    assert len(matcher.scan("secret", "tool", "Write")) == 1
+    assert len(matcher.scan("secret", "tool", "Read")) == 1
+
+
+def test_tool_filter_combined_with_target() -> None:
+    """Test that tool filter works with target filter."""
+    rule = Rule(id="bash-only", pattern="secret", target="tool", tool="Bash")
+    matcher = PatternMatcher([rule])
+    # Matches: target=tool + tool=Bash
+    assert len(matcher.scan("secret", "tool", "Bash")) == 1
+    # No match: wrong target
+    assert len(matcher.scan("secret", "llm", "Bash")) == 0
+    # No match: wrong tool
+    assert len(matcher.scan("secret", "tool", "Write")) == 0
+
+
+def test_mixed_tool_rules() -> None:
+    """Test multiple rules with different tool filters."""
+    rules = [
+        Rule(id="bash-flag", pattern="--force", tool="Bash"),
+        Rule(id="any-secret", pattern="password", tool=None),
+    ]
+    matcher = PatternMatcher(rules)
+    # Bash command with --force: both rules checked, only bash-flag matches
+    assert len(matcher.scan("git push --force", "tool", "Bash")) == 1
+    # Bash command with password: any-secret matches
+    assert len(matcher.scan("password=123", "tool", "Bash")) == 1
+    # Write with --force: bash-flag doesn't match (wrong tool)
+    assert len(matcher.scan("--force", "tool", "Write")) == 0
+    # Write with password: any-secret matches (tool=None)
+    assert len(matcher.scan("password", "tool", "Write")) == 1

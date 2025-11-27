@@ -40,6 +40,7 @@ def _parse_rule(data: dict[str, Any]) -> Rule:
         action=data.get("action", "block"),
         replacement=data.get("replacement"),
         target=data.get("target", "both"),
+        tool=data.get("tool"),
         description=data.get("description", ""),
     )
 
@@ -71,6 +72,7 @@ def save_rules_file(path: Path, rules: list[Rule]) -> None:
                     "action": r.action if r.action != "block" else None,
                     "replacement": r.replacement,
                     "target": r.target if r.target != "both" else None,
+                    "tool": r.tool,
                     "description": r.description if r.description else None,
                 }.items()
                 if v is not None

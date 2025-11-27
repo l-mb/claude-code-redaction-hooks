@@ -277,3 +277,34 @@ def test_run_hook_dispatches_post_tool_use(rules_dir: Path) -> None:
     with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
         code = run_hook(rules_dir)
     assert code == 0
+
+
+def test_tool_filter_blocks_only_matching_tool(tmp_path: Path) -> None:
+    """Test that tool-specific rules only trigger for that tool."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: no-verify
+    pattern: '--no-verify'
+    action: block
+    tool: Bash
+    description: Bypasses hooks
+""")
+    # Bash command with --no-verify: blocked
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git commit --no-verify"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+    assert output["continue"] is False
+
+    # Write with --no-verify in content: allowed (wrong tool)
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "git commit --no-verify", "file_path": "test.sh"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True
