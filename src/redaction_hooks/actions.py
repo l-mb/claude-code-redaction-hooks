@@ -65,6 +65,7 @@ def apply_actions(text: str, matches: list[Match], project_dir: Path | None = No
 
     Returns ScanResult with:
     - block_reasons: list of reasons if any blocking rules matched
+    - warn_reasons: list of reasons for warning rules (allowed but logged)
     - redacted_text: text with redactions applied (None if blocked)
     - matches: the original matches
     """
@@ -72,17 +73,20 @@ def apply_actions(text: str, matches: list[Match], project_dir: Path | None = No
         return ScanResult(matches=[], redacted_text=text)
 
     block_reasons: list[str] = []
+    warn_reasons: list[str] = []
     redact_matches: list[Match] = []
 
     for match in matches:
+        reason = f"[{match.rule.id}] {match.rule.description or 'Pattern matched'}"
         if match.rule.action == "block":
-            reason = f"[{match.rule.id}] {match.rule.description or 'Pattern matched'}"
             block_reasons.append(reason)
+        elif match.rule.action == "warn":
+            warn_reasons.append(reason)
         else:
             redact_matches.append(match)
 
     if block_reasons:
-        return ScanResult(matches=matches, block_reasons=block_reasons)
+        return ScanResult(matches=matches, block_reasons=block_reasons, warn_reasons=warn_reasons)
 
     # Apply redactions in reverse order to preserve positions
     result = text
@@ -90,4 +94,4 @@ def apply_actions(text: str, matches: list[Match], project_dir: Path | None = No
         replacement = _get_replacement(match, project_dir)
         result = result[: match.start] + replacement + result[match.end :]
 
-    return ScanResult(matches=matches, redacted_text=result)
+    return ScanResult(matches=matches, warn_reasons=warn_reasons, redacted_text=result)

@@ -17,7 +17,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-Action = Literal["block", "redact"]
+Action = Literal["block", "redact", "warn"]
 Target = Literal["llm", "tool", "both"]
 Replacement = Literal["str", "ip", "email", "hostname"] | str
 
@@ -27,7 +27,8 @@ class Rule:
     """A redaction rule defining a pattern and action."""
 
     id: str
-    pattern: str
+    pattern: str | None = None  # Content pattern (regex or fixed string)
+    path_pattern: str | None = None  # File path pattern (glob via fnmatch)
     is_regex: bool = True
     hashed: bool = False
     hash_extractor: str | None = None
@@ -36,6 +37,10 @@ class Rule:
     target: Target = "both"
     tool: str | None = None  # Filter to specific tool (e.g., "Bash"), None = all tools
     description: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.pattern and not self.path_pattern:
+            raise ValueError(f"Rule '{self.id}': must have pattern or path_pattern")
 
 
 @dataclass
@@ -55,4 +60,5 @@ class ScanResult:
 
     matches: list[Match] = field(default_factory=list)
     block_reasons: list[str] = field(default_factory=list)
+    warn_reasons: list[str] = field(default_factory=list)
     redacted_text: str | None = None

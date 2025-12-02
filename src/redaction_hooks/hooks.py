@@ -15,6 +15,7 @@
 """Claude Code hook handlers."""
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,50 @@ from typing import Any
 from .actions import apply_actions
 from .config import load_rules
 from .matcher import PatternMatcher
+
+# Regex to identify path-like tokens in shell commands
+_PATH_PATTERN = re.compile(r"^(?:[~/.]|/[^/])")
+_URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
+# Fallback regex for path extraction when shlex fails
+_FALLBACK_PATH_RE = re.compile(r"(?:^|[\s;|&])([~/][^\s;|&]+|\.\.?/[^\s;|&]+)")
+
+
+def _extract_bash_paths(command: str) -> list[str]:
+    """Extract path-like tokens from a shell command."""
+    import shlex
+
+    paths: list[str] = []
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        # Malformed command (unclosed quotes), fall back to regex
+        return [m.group(1) for m in _FALLBACK_PATH_RE.finditer(command)]
+
+    for token in tokens:
+        # Skip URLs
+        if _URL_PATTERN.match(token):
+            continue
+        # Check if token looks like a path
+        if _PATH_PATTERN.match(token) or "/" in token:
+            paths.append(token)
+    return paths
+
+
+def _get_tool_input_paths(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
+    """Extract file paths from tool input for path-based matching."""
+    if tool_name in ("Read", "Write", "Edit", "MultiEdit"):
+        path = tool_input.get("file_path")
+        return [path] if path else []
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+        return _extract_bash_paths(command)
+    return []
+
+
+def _emit_warnings(warn_reasons: list[str]) -> None:
+    """Write warning messages to stderr."""
+    for reason in warn_reasons:
+        sys.stderr.write(f"Warning: {reason}\n")
 
 
 def _get_tool_input_content(tool_name: str, tool_input: dict[str, Any]) -> str | None:
@@ -113,33 +158,63 @@ def _build_redact_response(
 
 def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -> int:
     """Handle PreToolUse hook event."""
+    from .models import Match
+    from .path_matcher import PathMatcher
+
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
-
-    content = _get_tool_input_content(tool_name, tool_input)
-    if not content:
-        json.dump({"continue": True}, sys.stdout)
-        return 0
 
     rules = load_rules(project_dir)
     if not rules:
         json.dump({"continue": True}, sys.stdout)
         return 0
 
-    matcher = PatternMatcher(rules)
-    matches = matcher.scan(content, "tool", tool_name)
-    if not matches:
+    # Separate rules into categories
+    path_only_rules = [r for r in rules if r.path_pattern and not r.pattern]
+    content_only_rules = [r for r in rules if r.pattern and not r.path_pattern]
+    combined_rules = [r for r in rules if r.path_pattern and r.pattern]
+
+    all_matches: list[Match] = []
+    paths = _get_tool_input_paths(tool_name, tool_input)
+    content = _get_tool_input_content(tool_name, tool_input)
+
+    # Check path-only rules
+    if paths and path_only_rules:
+        path_matcher = PathMatcher(path_only_rules, project_dir)
+        all_matches.extend(path_matcher.scan(paths, "tool", tool_name))
+
+    # Check content-only rules
+    if content and content_only_rules:
+        content_matcher = PatternMatcher(content_only_rules)
+        all_matches.extend(content_matcher.scan(content, "tool", tool_name))
+
+    # Check combined rules (both path AND content must match)
+    if paths and content and combined_rules:
+        path_matcher = PathMatcher(combined_rules, project_dir)
+        path_matches = path_matcher.scan(paths, "tool", tool_name)
+        matched_rule_ids = {m.rule.id for m in path_matches}
+        # Only check content for rules where path already matched
+        content_rules = [r for r in combined_rules if r.id in matched_rule_ids]
+        if content_rules:
+            content_matcher = PatternMatcher(content_rules)
+            all_matches.extend(content_matcher.scan(content, "tool", tool_name))
+
+    if not all_matches:
         json.dump({"continue": True}, sys.stdout)
         return 0
 
-    result = apply_actions(content, matches, project_dir)
+    result = apply_actions(content or "", all_matches, project_dir)
+
+    # Emit warnings first
+    if result.warn_reasons:
+        _emit_warnings(result.warn_reasons)
 
     if result.block_reasons:
         json.dump(_build_block_response(result.block_reasons), sys.stdout)
         sys.stderr.write(f"Blocked: {'; '.join(result.block_reasons)}\n")
         return 2
 
-    if result.redacted_text and result.redacted_text != content:
+    if content and result.redacted_text and result.redacted_text != content:
         json.dump(_build_redact_response(tool_input, result.redacted_text, tool_name), sys.stdout)
         return 0
 
@@ -167,6 +242,10 @@ def handle_user_prompt_submit(data: dict[str, Any], project_dir: Path | None = N
 
     result = apply_actions(prompt, matches, project_dir)
 
+    # Emit warnings first
+    if result.warn_reasons:
+        _emit_warnings(result.warn_reasons)
+
     if result.block_reasons:
         response = {
             "decision": "block",
@@ -192,8 +271,8 @@ def handle_user_prompt_submit(data: dict[str, Any], project_dir: Path | None = N
 def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) -> int:
     """Handle PostToolUse hook event - scan tool output for secrets.
 
-    Note: PostToolUse cannot modify tool output, only block. Redact rules
-    will trigger a warning but allow continuation.
+    Note: PostToolUse cannot modify tool output, only block. Redact and warn
+    rules will trigger warnings but allow continuation.
     """
     tool_name = data.get("tool_name", "")
     tool_response = data.get("tool_response")
@@ -214,17 +293,20 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
         json.dump({"continue": True}, sys.stdout)
         return 0
 
-    # Check for blocking rules
-    block_matches = [m for m in matches if m.rule.action == "block"]
-    if block_matches:
-        reasons = [f"{m.rule.id}: {m.rule.description or 'matched'}" for m in block_matches]
+    result = apply_actions(content, matches, project_dir)
+
+    # Emit warnings first
+    if result.warn_reasons:
+        _emit_warnings(result.warn_reasons)
+
+    if result.block_reasons:
         response = {
             "decision": "block",
-            "reason": f"Tool output blocked: {'; '.join(reasons)}",
+            "reason": f"Tool output blocked: {'; '.join(result.block_reasons)}",
             "hookSpecificOutput": {"hookEventName": "PostToolUse"},
         }
         json.dump(response, sys.stdout)
-        sys.stderr.write(f"Tool output blocked: {'; '.join(reasons)}\n")
+        sys.stderr.write(f"Tool output blocked: {'; '.join(result.block_reasons)}\n")
         return 2
 
     # Warn about redact matches - PostToolUse cannot modify output

@@ -308,3 +308,176 @@ rules:
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
     assert code == 0
     assert output["continue"] is True
+
+
+def test_warn_action_allows_but_logs(tmp_path: Path) -> None:
+    """Test that warn action allows the operation but logs to stderr."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: warn-tmp
+    path_pattern: '/tmp/*'
+    action: warn
+    description: Writing to tmp directory
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "test data", "file_path": "/tmp/test.txt"},
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True
+    assert "Warning" in stderr.getvalue()
+    assert "warn-tmp" in stderr.getvalue()
+
+
+def test_path_pattern_blocks_env_file(tmp_path: Path) -> None:
+    """Test that path_pattern blocks access to .env files."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-env
+    path_pattern: '*.env'
+    action: block
+    tool: Read
+    description: Blocked .env file
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": "/home/user/.env"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+    assert output["continue"] is False
+    assert "block-env" in output["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_path_pattern_allows_non_matching_file(tmp_path: Path) -> None:
+    """Test that path_pattern allows files that don't match."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-env
+    path_pattern: '*.env'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": "/home/user/config.yaml"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True
+
+
+def test_combined_path_and_pattern_requires_both(tmp_path: Path) -> None:
+    """Test that combined rules require both path AND pattern to match."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-in-env
+    path_pattern: '*.env'
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    description: AWS key in env file
+""")
+    # AWS key in .env file: blocked
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "AWS_KEY=AKIAIOSFODNN7EXAMPLE", "file_path": "config.env"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+    assert output["continue"] is False
+
+    # AWS key in non-.env file: allowed (path doesn't match)
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "AWS_KEY=AKIAIOSFODNN7EXAMPLE", "file_path": "config.yaml"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True
+
+    # Clean content in .env file: allowed (pattern doesn't match)
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "DEBUG=true", "file_path": "config.env"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True
+
+
+def test_bash_path_extraction_blocks(tmp_path: Path) -> None:
+    """Test that paths in Bash commands are extracted and matched."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-etc
+    path_pattern: '/etc/*'
+    action: block
+    tool: Bash
+    description: Blocked /etc access
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "cat /etc/passwd"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+    assert output["continue"] is False
+
+
+def test_bash_path_extraction_with_rm(tmp_path: Path) -> None:
+    """Test that rm commands with paths are blocked appropriately."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-rm-home
+    path_pattern: '/home/*'
+    pattern: 'rm\\s+.*-r'
+    action: block
+    tool: Bash
+    description: Dangerous rm in /home
+""")
+    # rm -rf on /home path: blocked
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "rm -rf /home/user/data"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+
+    # rm -rf on /tmp path: allowed (different path)
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "rm -rf /tmp/cache"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+
+
+def test_bash_url_not_matched_as_path(tmp_path: Path) -> None:
+    """Test that URLs in Bash commands are not treated as paths."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-http
+    path_pattern: 'http*'
+    action: block
+    tool: Bash
+""")
+    # URL should not trigger path-based blocking
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "curl https://example.com/api"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True

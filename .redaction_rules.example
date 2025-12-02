@@ -56,6 +56,51 @@ rules:
     tool: Bash
     description: git push requires mandatory human review
 
+  # Path-based rules (block access to certain files/directories)
+  - id: block-env-read
+    path_pattern: '*.env'
+    action: block
+    tool: Read
+    description: Block reading .env files
+
+  - id: block-secrets-dir
+    path_pattern: '**/secrets/**'
+    action: block
+    description: Block access to secrets directories
+
+  - id: block-etc-passwd
+    path_pattern: '/etc/passwd'
+    action: block
+    tool: Bash
+    description: Block accessing system password file
+
+  # Warn action (logs but allows - for files that may be needed occasionally)
+  - id: warn-tmp-write
+    path_pattern: '/tmp/*'
+    action: warn
+    tool: Write
+    description: Writing to /tmp directory
+
+  - id: warn-dotfiles
+    path_pattern: '~/.*'
+    action: warn
+    description: Accessing home directory dotfiles
+
+  # Combined path + pattern rules (both must match)
+  - id: aws-key-in-env
+    path_pattern: '*.env'
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    tool: Write
+    description: Block writing AWS keys to .env files
+
+  - id: dangerous-rm
+    path_pattern: '/home/*'
+    pattern: 'rm\s+.*-r'
+    action: block
+    tool: Bash
+    description: Block recursive rm on home directories
+
   # Example hashed secret (add with: echo "YourSecret" | redact secret add --id my-secret)
   # - id: my-secret
   #   pattern: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

@@ -21,7 +21,7 @@ import yaml
 
 from .models import Action, Rule, Target
 
-VALID_ACTIONS = {"block", "redact"}
+VALID_ACTIONS = {"block", "redact", "warn"}
 VALID_TARGETS = {"llm", "tool", "both"}
 
 PROJECT_RULES_FILE = ".redaction_rules"
@@ -33,7 +33,8 @@ def _parse_rule(data: dict[str, Any]) -> Rule:
     """Parse a rule dictionary into a Rule object."""
     return Rule(
         id=data["id"],
-        pattern=data["pattern"],
+        pattern=data.get("pattern"),
+        path_pattern=data.get("path_pattern"),
         is_regex=data.get("is_regex", True),
         hashed=data.get("hashed", False),
         hash_extractor=data.get("hash_extractor"),
@@ -66,6 +67,7 @@ def save_rules_file(path: Path, rules: list[Rule]) -> None:
                 for k, v in {
                     "id": r.id,
                     "pattern": r.pattern,
+                    "path_pattern": r.path_pattern,
                     "is_regex": r.is_regex if not r.is_regex else None,
                     "hashed": r.hashed if r.hashed else None,
                     "hash_extractor": r.hash_extractor,
@@ -162,13 +164,20 @@ def _validate_rule(rule: dict[str, Any], index: int, seen_ids: set[str]) -> list
             errors.append(f"{prefix}: duplicate id")
         seen_ids.add(rule_id)
 
-    if "pattern" not in rule:
-        errors.append(f"{prefix}: missing required field 'pattern'")
-    elif rule.get("is_regex", True) and not rule.get("hashed", False):
+    has_pattern = "pattern" in rule
+    has_path_pattern = "path_pattern" in rule
+
+    if not has_pattern and not has_path_pattern:
+        errors.append(f"{prefix}: must have 'pattern' or 'path_pattern'")
+
+    if has_pattern and rule.get("is_regex", True) and not rule.get("hashed", False):
         try:
             re.compile(rule["pattern"])
         except re.error as e:
             errors.append(f"{prefix}: invalid regex pattern: {e}")
+
+    if has_path_pattern and not isinstance(rule["path_pattern"], str):
+        errors.append(f"{prefix}: path_pattern must be a string")
 
     if "hash_extractor" in rule:
         try:
@@ -177,11 +186,11 @@ def _validate_rule(rule: dict[str, Any], index: int, seen_ids: set[str]) -> list
             errors.append(f"{prefix}: invalid hash_extractor regex: {e}")
 
     if "action" in rule and rule["action"] not in VALID_ACTIONS:
-        valid = ", ".join(VALID_ACTIONS)
+        valid = ", ".join(sorted(VALID_ACTIONS))
         errors.append(f"{prefix}: invalid action '{rule['action']}' (must be: {valid})")
 
     if "target" in rule and rule["target"] not in VALID_TARGETS:
-        valid = ", ".join(VALID_TARGETS)
+        valid = ", ".join(sorted(VALID_TARGETS))
         errors.append(f"{prefix}: invalid target '{rule['target']}' (must be: {valid})")
 
     return errors

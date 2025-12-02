@@ -30,11 +30,13 @@ class PatternMatcher:
     """Scans text against a list of redaction rules."""
 
     def __init__(self, rules: list[Rule]) -> None:
-        self.rules = rules
+        # Only include rules that have a content pattern
+        self.rules = [r for r in rules if r.pattern]
         self._compiled: dict[str, re.Pattern[str]] = {}
 
     def _get_pattern(self, rule: Rule) -> re.Pattern[str]:
         """Get compiled regex pattern for a rule."""
+        assert rule.pattern is not None  # Guaranteed by filtering in __init__
         if rule.id not in self._compiled:
             if rule.is_regex:
                 self._compiled[rule.id] = re.compile(rule.pattern)

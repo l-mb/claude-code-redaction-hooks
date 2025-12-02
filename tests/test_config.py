@@ -184,7 +184,7 @@ rules:
 
 
 def test_validate_missing_pattern(tmp_rules_file: Path) -> None:
-    """Test validation catches missing pattern field."""
+    """Test validation catches missing pattern and path_pattern fields."""
     from redaction_hooks.config import validate_rules_file
 
     tmp_rules_file.write_text("""
@@ -192,7 +192,7 @@ rules:
   - id: test
 """)
     errors = validate_rules_file(tmp_rules_file)
-    assert any("missing required field 'pattern'" in e for e in errors)
+    assert any("must have 'pattern' or 'path_pattern'" in e for e in errors)
 
 
 def test_validate_invalid_regex(tmp_rules_file: Path) -> None:
