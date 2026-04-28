@@ -24,7 +24,7 @@ from typing import Any
 from .actions import apply_actions
 from .audit import log_event
 from .config import load_rules
-from .matcher import PatternMatcher
+from .matcher import DEFAULT_REGEX_TIMEOUT_SECONDS, PatternMatcher, RegexTimeoutError, regex_timeout
 from .models import Match, Rule
 from .path_matcher import PathMatcher
 
@@ -41,6 +41,24 @@ def _audit(
     rule_ids = sorted({m.rule.id for m in matches})
     if rule_ids:
         log_event(hook=hook, action=action, rule_ids=rule_ids, tool=tool, project_dir=project_dir)
+
+
+def _audit_timeouts(
+    hook: str,
+    rule_ids: list[str],
+    *,
+    tool: str | None = None,
+    project_dir: Path | None = None,
+) -> None:
+    """Audit any rules whose regex exceeded the timeout."""
+    if rule_ids:
+        log_event(
+            hook=hook,
+            action="regex_timeout",
+            rule_ids=sorted(set(rule_ids)),
+            tool=tool,
+            project_dir=project_dir,
+        )
 
 
 # Regex to identify path-like tokens in shell commands (starts with ~, ., or /)
@@ -266,7 +284,7 @@ def _check_file_content_rules(
     paths: list[str],
     tool_name: str,
     project_dir: Path | None = None,
-) -> tuple[list[Match], list[str]]:
+) -> tuple[list[Match], list[str], list[str]]:
     """Check file_content_pattern rules against file contents.
 
     Paths that resolve outside `project_dir` always block, regardless of rule
@@ -274,17 +292,18 @@ def _check_file_content_rules(
     Other unreadable cases preserve the older behavior: block only if a
     block-action rule could have applied.
 
-    Returns (matches, block_reasons).
+    Returns (matches, block_reasons, timed_out_rule_ids).
     """
 
     file_content_rules: list[Rule] = [
         r for r in rules if r.file_content_pattern and _file_tools_matches(r.file_tools, tool_name)
     ]
     if not file_content_rules or not paths:
-        return [], []
+        return [], [], []
 
     matches: list[Match] = []
     block_reasons: list[str] = []
+    timed_out: list[str] = []
 
     for path in paths:
         file_content, error = _read_file_head(path, project_dir)
@@ -312,7 +331,16 @@ def _check_file_content_rules(
             # rule.file_content_pattern is guaranteed non-None by filter above
             assert rule.file_content_pattern is not None
             compiled = re.compile(rule.file_content_pattern)
-            m = compiled.search(file_content)
+            try:
+                with regex_timeout(DEFAULT_REGEX_TIMEOUT_SECONDS):
+                    m = compiled.search(file_content)
+            except RegexTimeoutError:
+                timed_out.append(rule.id)
+                sys.stderr.write(
+                    f"redaction_hooks: file_content_pattern for rule '{rule.id}' "
+                    f"exceeded {DEFAULT_REGEX_TIMEOUT_SECONDS}s on '{path}' -- skipping\n"
+                )
+                continue
             if m:
                 matches.append(
                     Match(
@@ -323,7 +351,7 @@ def _check_file_content_rules(
                     )
                 )
 
-    return matches, block_reasons
+    return matches, block_reasons, timed_out
 
 
 def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -> int:
@@ -356,10 +384,13 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
         path_matcher = PathMatcher(path_only_rules, project_dir)
         all_matches.extend(path_matcher.scan(paths, "tool", tool_name))
 
+    timeouts: list[str] = []
+
     # Check content-only rules
     if content and content_only_rules:
         content_matcher = PatternMatcher(content_only_rules)
         all_matches.extend(content_matcher.scan(content, "tool", tool_name))
+        timeouts.extend(content_matcher.last_timeouts)
 
     # Check combined rules (both path AND content must match)
     if paths and content and combined_rules:
@@ -371,16 +402,19 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
         if content_rules:
             content_matcher = PatternMatcher(content_rules)
             all_matches.extend(content_matcher.scan(content, "tool", tool_name))
+            timeouts.extend(content_matcher.last_timeouts)
 
     # Check file_content_pattern rules (reads actual file content)
     file_content_rules = [r for r in rules if r.file_content_pattern]
     if paths and file_content_rules:
-        fc_matches, fc_block_reasons = _check_file_content_rules(
+        fc_matches, fc_block_reasons, fc_timeouts = _check_file_content_rules(
             file_content_rules, paths, tool_name, project_dir
         )
         all_matches.extend(fc_matches)
+        timeouts.extend(fc_timeouts)
         # Immediately block if file was unreadable
         if fc_block_reasons:
+            _audit_timeouts("PreToolUse", timeouts, tool=tool_name, project_dir=project_dir)
             unreadable_ids = sorted({r.id for r in file_content_rules if r.action == "block"})
             log_event(
                 hook="PreToolUse",
@@ -392,6 +426,8 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
             json.dump(_build_block_response(fc_block_reasons), sys.stdout)
             sys.stderr.write(f"Blocked: {'; '.join(fc_block_reasons)}\n")
             return 2
+
+    _audit_timeouts("PreToolUse", timeouts, tool=tool_name, project_dir=project_dir)
 
     if not all_matches:
         json.dump({"continue": True}, sys.stdout)
@@ -451,6 +487,7 @@ def handle_user_prompt_submit(data: dict[str, Any], project_dir: Path | None = N
 
     matcher = PatternMatcher(rules)
     matches = matcher.scan(prompt, "llm")
+    _audit_timeouts("UserPromptSubmit", matcher.last_timeouts, project_dir=project_dir)
     if not matches:
         json.dump({"continue": True}, sys.stdout)
         return 0
@@ -522,9 +559,11 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
     warn_reasons: list[str] = []
     redacted_fields: list[tuple[str, str]] = []
     all_matches: list[Match] = []
+    timeouts: list[str] = []
 
     for field_path, content in fields:
         matches = matcher.scan(content, "tool", tool_name)
+        timeouts.extend(matcher.last_timeouts)
         if not matches:
             continue
         all_matches.extend(matches)
@@ -533,6 +572,8 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
         warn_reasons.extend(result.warn_reasons)
         if result.redacted_text is not None and result.redacted_text != content:
             redacted_fields.append((field_path, result.redacted_text))
+
+    _audit_timeouts("PostToolUse", timeouts, tool=tool_name, project_dir=project_dir)
 
     if warn_reasons:
         _emit_warnings(warn_reasons)
@@ -639,6 +680,7 @@ def handle_pre_compact(data: dict[str, Any], project_dir: Path | None = None) ->
 
     matcher = PatternMatcher(llm_rules)
     all_matches: list[Match] = []
+    timeouts: list[str] = []
     for line in transcript_lines:
         try:
             obj = json.loads(line)
@@ -646,6 +688,9 @@ def handle_pre_compact(data: dict[str, Any], project_dir: Path | None = None) ->
             continue
         for text in _walk_strings(obj):
             all_matches.extend(matcher.scan(text, "llm"))
+            timeouts.extend(matcher.last_timeouts)
+
+    _audit_timeouts("PreCompact", timeouts, project_dir=project_dir)
 
     if not all_matches:
         json.dump({"continue": True}, sys.stdout)

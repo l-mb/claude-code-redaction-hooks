@@ -16,9 +16,48 @@
 
 import hashlib
 import re
+import signal
+import sys
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Literal
 
 from .models import Match, Rule
+
+DEFAULT_REGEX_TIMEOUT_SECONDS = 1
+
+
+class RegexTimeoutError(Exception):
+    """Raised when a regex match exceeds the configured per-rule timeout."""
+
+
+@contextmanager
+def regex_timeout(seconds: int) -> Iterator[None]:
+    """Bound the runtime of regex operations to `seconds`.
+
+    Uses SIGALRM, which only works on POSIX in the main thread. On other
+    platforms or in worker threads this becomes a no-op -- the regex still
+    runs, just without enforcement.
+    """
+    if (
+        seconds <= 0
+        or not hasattr(signal, "SIGALRM")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+
+    def _handler(signum: int, frame: object) -> None:
+        raise RegexTimeoutError
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def hash_text(text: str) -> str:
@@ -29,10 +68,14 @@ def hash_text(text: str) -> str:
 class PatternMatcher:
     """Scans text against a list of redaction rules."""
 
-    def __init__(self, rules: list[Rule]) -> None:
+    def __init__(
+        self, rules: list[Rule], *, timeout_seconds: int = DEFAULT_REGEX_TIMEOUT_SECONDS
+    ) -> None:
         # Only include rules that have a content pattern
         self.rules = [r for r in rules if r.pattern]
         self._compiled: dict[str, re.Pattern[str]] = {}
+        self.timeout_seconds = timeout_seconds
+        self.last_timeouts: list[str] = []
 
     def _get_pattern(self, rule: Rule) -> re.Pattern[str]:
         """Get compiled regex pattern for a rule."""
@@ -63,16 +106,25 @@ class PatternMatcher:
             target: "llm" for prompts, "tool" for tool inputs/outputs
             tool_name: Filter to rules matching this tool (None = all rules)
         """
+        self.last_timeouts = []
         matches: list[Match] = []
         for rule in self.rules:
             if rule.target != "both" and rule.target != target:
                 continue
             if rule.tool is not None and rule.tool != tool_name:
                 continue
-            if rule.hashed:
-                matches.extend(self._match_hashed(rule, text))
-            else:
-                matches.extend(self._match_plain(rule, text))
+            try:
+                with regex_timeout(self.timeout_seconds):
+                    if rule.hashed:
+                        matches.extend(self._match_hashed(rule, text))
+                    else:
+                        matches.extend(self._match_plain(rule, text))
+            except RegexTimeoutError:
+                self.last_timeouts.append(rule.id)
+                sys.stderr.write(
+                    f"redaction_hooks: regex for rule '{rule.id}' exceeded "
+                    f"{self.timeout_seconds}s -- skipping\n"
+                )
         return matches
 
     def _match_plain(self, rule: Rule, text: str) -> list[Match]:

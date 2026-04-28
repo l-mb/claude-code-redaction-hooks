@@ -14,6 +14,8 @@
 
 """Tests for pattern matching engine."""
 
+import time
+
 from redaction_hooks.matcher import PatternMatcher, hash_text
 from redaction_hooks.models import Rule
 
@@ -130,6 +132,29 @@ def test_tool_filter_combined_with_target() -> None:
     assert len(matcher.scan("secret", "llm", "Bash")) == 0
     # No match: wrong tool
     assert len(matcher.scan("secret", "tool", "Write")) == 0
+
+
+def test_redos_pattern_times_out() -> None:
+    """Catastrophic-backtracking regex must be skipped within the timeout, not hang."""
+    rule = Rule(id="redos", pattern=r"(a+)+b")
+    matcher = PatternMatcher([rule], timeout_seconds=1)
+    pathological = "a" * 30 + "X"
+
+    t0 = time.monotonic()
+    matches = matcher.scan(pathological, "llm")
+    elapsed = time.monotonic() - t0
+
+    assert matches == []
+    assert "redos" in matcher.last_timeouts
+    assert elapsed < 3, f"timeout did not enforce, took {elapsed:.2f}s"
+
+
+def test_normal_pattern_does_not_record_timeout() -> None:
+    """Well-behaved regex should not be reported as timed out."""
+    rule = Rule(id="email", pattern=r"[a-z]+@example\.com")
+    matcher = PatternMatcher([rule], timeout_seconds=1)
+    matcher.scan("alice@example.com", "llm")
+    assert matcher.last_timeouts == []
 
 
 def test_mixed_tool_rules() -> None:
