@@ -112,42 +112,50 @@ def _get_tool_input_content(tool_name: str, tool_input: dict[str, Any]) -> str |
     return None
 
 
-def _get_tool_output_content(tool_name: str, tool_response: Any) -> str | None:
-    """Extract content to scan from tool output based on tool type."""
+def _iter_output_fields(tool_name: str, tool_response: Any) -> list[tuple[str, str]]:
+    """Return (field_path, content) pairs for each scannable string field in tool_response.
+
+    Each field is scanned and redacted independently so the response shape required by
+    `hookSpecificOutput.updatedToolOutput` is preserved. `field_path` is a dict key,
+    or `matches[i]` for elements of a Grep/Glob matches list, or "" when the response
+    itself is a string.
+    """
     if not isinstance(tool_response, dict):
-        return str(tool_response) if tool_response else None
+        text = str(tool_response) if tool_response else ""
+        return [("", text)] if text else []
 
-    # Read tool returns file content
-    if tool_name == "Read":
-        return tool_response.get("content") or tool_response.get("output")
-
-    # Bash tool returns stdout/stderr
     if tool_name == "Bash":
-        parts = []
-        if tool_response.get("stdout"):
-            parts.append(tool_response["stdout"])
-        if tool_response.get("stderr"):
-            parts.append(tool_response["stderr"])
-        if tool_response.get("output"):
-            parts.append(tool_response["output"])
-        return "\n".join(parts) if parts else None
+        string_fields: tuple[str, ...] = ("stdout", "stderr", "output")
+    elif tool_name in ("Read", "WebFetch"):
+        string_fields = ("content", "output")
+    elif tool_name in ("Grep", "Glob"):
+        string_fields = ("output",)
+    else:
+        string_fields = ("content", "output", "result", "text")
 
-    # Grep/Glob return matches
+    fields: list[tuple[str, str]] = []
+    for key in string_fields:
+        val = tool_response.get(key)
+        if isinstance(val, str) and val:
+            fields.append((key, val))
+
     if tool_name in ("Grep", "Glob"):
-        if "matches" in tool_response:
-            return "\n".join(str(m) for m in tool_response["matches"])
-        return tool_response.get("output")
+        matches_val = tool_response.get("matches")
+        if isinstance(matches_val, list):
+            for i, m in enumerate(matches_val):
+                if isinstance(m, str) and m:
+                    fields.append((f"matches[{i}]", m))
 
-    # WebFetch returns content
-    if tool_name == "WebFetch":
-        return tool_response.get("content") or tool_response.get("output")
+    return fields
 
-    # Generic fallback - try common fields
-    for field in ("content", "output", "result", "text"):
-        if field in tool_response:
-            return str(tool_response[field])
 
-    return None
+def _set_output_field(tool_response: dict[str, Any], field_path: str, value: str) -> None:
+    """Write `value` back to `tool_response` at `field_path` (set by _iter_output_fields)."""
+    if "[" in field_path:
+        key, idx_part = field_path.split("[", 1)
+        tool_response[key][int(idx_part.rstrip("]"))] = value
+    else:
+        tool_response[field_path] = value
 
 
 def _build_block_response(reasons: list[str]) -> dict[str, Any]:
@@ -370,53 +378,74 @@ def handle_user_prompt_submit(data: dict[str, Any], project_dir: Path | None = N
 
 
 def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) -> int:
-    """Handle PostToolUse hook event - scan tool output for secrets.
+    """Handle PostToolUse hook event - scan tool output and apply block/redact actions.
 
-    Note: PostToolUse cannot modify tool output, only block. Redact and warn
-    rules will trigger warnings but allow continuation.
+    Redactions are written back to the original tool_response shape via
+    hookSpecificOutput.updatedToolOutput (Claude Code v2.1.121+). For non-dict
+    responses we cannot reliably reconstruct the schema, so redactions are skipped
+    with a stderr warning.
     """
     tool_name = data.get("tool_name", "")
     tool_response = data.get("tool_response")
-
-    content = _get_tool_output_content(tool_name, tool_response)
-    if not content:
-        json.dump({"continue": True}, sys.stdout)
-        return 0
 
     rules = load_rules(project_dir)
     if not rules:
         json.dump({"continue": True}, sys.stdout)
         return 0
 
-    matcher = PatternMatcher(rules)
-    matches = matcher.scan(content, "tool", tool_name)
-    if not matches:
+    fields = _iter_output_fields(tool_name, tool_response)
+    if not fields:
         json.dump({"continue": True}, sys.stdout)
         return 0
 
-    result = apply_actions(content, matches, project_dir)
+    matcher = PatternMatcher(rules)
+    block_reasons: list[str] = []
+    warn_reasons: list[str] = []
+    redacted_fields: list[tuple[str, str]] = []
 
-    # Emit warnings first
-    if result.warn_reasons:
-        _emit_warnings(result.warn_reasons)
+    for field_path, content in fields:
+        matches = matcher.scan(content, "tool", tool_name)
+        if not matches:
+            continue
+        result = apply_actions(content, matches, project_dir)
+        block_reasons.extend(result.block_reasons)
+        warn_reasons.extend(result.warn_reasons)
+        if result.redacted_text is not None and result.redacted_text != content:
+            redacted_fields.append((field_path, result.redacted_text))
 
-    if result.block_reasons:
+    if warn_reasons:
+        _emit_warnings(warn_reasons)
+
+    if block_reasons:
         response = {
             "decision": "block",
-            "reason": f"Tool output blocked: {'; '.join(result.block_reasons)}",
+            "reason": f"Tool output blocked: {'; '.join(block_reasons)}",
             "hookSpecificOutput": {"hookEventName": "PostToolUse"},
         }
         json.dump(response, sys.stdout)
-        sys.stderr.write(f"Tool output blocked: {'; '.join(result.block_reasons)}\n")
+        sys.stderr.write(f"Tool output blocked: {'; '.join(block_reasons)}\n")
         return 2
 
-    # Warn about redact matches - PostToolUse cannot modify output
-    redact_matches = [m for m in matches if m.rule.action == "redact"]
-    if redact_matches:
-        ids = ", ".join(m.rule.id for m in redact_matches)
-        sys.stderr.write(f"Warning: redact rules [{ids}] cannot modify tool output\n")
+    if not redacted_fields:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
 
-    json.dump({"continue": True}, sys.stdout)
+    if not isinstance(tool_response, dict):
+        sys.stderr.write(f"Warning: cannot redact non-dict tool_response for {tool_name}\n")
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    for field_path, redacted in redacted_fields:
+        _set_output_field(tool_response, field_path, redacted)
+
+    response = {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "updatedToolOutput": tool_response,
+        },
+        "systemMessage": "Tool output was redacted before being shown to the model",
+    }
+    json.dump(response, sys.stdout)
     return 0
 
 

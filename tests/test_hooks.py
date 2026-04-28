@@ -247,8 +247,8 @@ def test_post_tool_use_allows_clean_output(rules_dir: Path) -> None:
     assert output["continue"] is True
 
 
-def test_post_tool_use_redact_warns(rules_dir: Path) -> None:
-    """Test PostToolUse warns for redact rules (cannot modify output)."""
+def test_post_tool_use_redacts_via_updated_tool_output(rules_dir: Path) -> None:
+    """Test PostToolUse redacts output via hookSpecificOutput.updatedToolOutput."""
     from redaction_hooks.hooks import handle_post_tool_use
 
     data = {
@@ -256,13 +256,183 @@ def test_post_tool_use_redact_warns(rules_dir: Path) -> None:
         "tool_name": "Read",
         "tool_response": {"content": "contact: alice@secret.com"},
     }
+    code, output = capture_output(handle_post_tool_use, data, rules_dir)
+    assert code == 0
+    updated = output["hookSpecificOutput"]["updatedToolOutput"]
+    assert "alice@secret.com" not in updated["content"]
+    assert "@example.com" in updated["content"]
+    assert output["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+
+def test_post_tool_use_redacts_bash_stdout_and_stderr(tmp_path: Path) -> None:
+    """Test PostToolUse independently redacts each Bash output field."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: email-redact
+    pattern: '[a-z]+@secret\\.com'
+    action: redact
+    replacement: email
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_response": {
+            "stdout": "user: alice@secret.com",
+            "stderr": "warning: bob@secret.com not found",
+            "interrupted": False,
+        },
+    }
+    code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 0
+    updated = output["hookSpecificOutput"]["updatedToolOutput"]
+    assert "alice@secret.com" not in updated["stdout"]
+    assert "bob@secret.com" not in updated["stderr"]
+    assert updated["interrupted"] is False  # untouched fields preserved
+
+
+def test_post_tool_use_redacts_grep_matches_list(tmp_path: Path) -> None:
+    """Test PostToolUse redacts each element of a Grep matches list independently."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: email-redact
+    pattern: '[a-z]+@secret\\.com'
+    action: redact
+    replacement: email
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Grep",
+        "tool_response": {
+            "matches": [
+                "line1: alice@secret.com",
+                "line2: clean",
+                "line3: bob@secret.com",
+            ],
+        },
+    }
+    code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 0
+    matches = output["hookSpecificOutput"]["updatedToolOutput"]["matches"]
+    assert "alice@secret.com" not in matches[0]
+    assert matches[1] == "line2: clean"
+    assert "bob@secret.com" not in matches[2]
+
+
+def test_post_tool_use_redaction_consistent_across_fields(tmp_path: Path) -> None:
+    """Test the same secret in two fields gets the same replacement (mapping store)."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: email-redact
+    pattern: '[a-z]+@secret\\.com'
+    action: redact
+    replacement: email
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_response": {
+            "stdout": "user: alice@secret.com",
+            "stderr": "user: alice@secret.com again",
+        },
+    }
+    code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 0
+    updated = output["hookSpecificOutput"]["updatedToolOutput"]
+    import re as _re
+
+    stdout_repl = _re.search(r"redacted-[0-9a-f]+@example\.com", updated["stdout"])
+    stderr_repl = _re.search(r"redacted-[0-9a-f]+@example\.com", updated["stderr"])
+    assert stdout_repl and stderr_repl
+    assert stdout_repl.group(0) == stderr_repl.group(0)
+
+
+def test_post_tool_use_block_wins_over_redact(tmp_path: Path) -> None:
+    """Test PostToolUse blocks when block and redact rules both match across fields."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-block
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+  - id: email-redact
+    pattern: '[a-z]+@secret\\.com'
+    action: redact
+    replacement: email
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_response": {
+            "stdout": "key=AKIAIOSFODNN7EXAMPLE",
+            "stderr": "user: alice@secret.com",
+        },
+    }
+    code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 2
+    assert output["decision"] == "block"
+    assert "aws-block" in output["reason"]
+    assert "updatedToolOutput" not in output["hookSpecificOutput"]
+
+
+def test_post_tool_use_warn_only_emits_warning_no_update(tmp_path: Path) -> None:
+    """Test PostToolUse warn-only matches emit warning but no updatedToolOutput."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: warn-rule
+    pattern: 'sensitive'
+    action: warn
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_response": {"content": "this is sensitive data"},
+    }
     stderr = io.StringIO()
     with patch.object(sys, "stderr", stderr):
-        code, output = capture_output(handle_post_tool_use, data, rules_dir)
+        code, output = capture_output(handle_post_tool_use, data, tmp_path)
     assert code == 0
-    assert output["continue"] is True
-    assert "Warning" in stderr.getvalue()
-    assert "email" in stderr.getvalue()
+    assert output == {"continue": True}
+    assert "warn-rule" in stderr.getvalue()
+
+
+def test_post_tool_use_non_dict_response_warns(tmp_path: Path) -> None:
+    """Test PostToolUse with string-shaped tool_response cannot redact safely."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: email-redact
+    pattern: '[a-z]+@secret\\.com'
+    action: redact
+    replacement: email
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "CustomTool",
+        "tool_response": "contact: alice@secret.com",
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+    assert "cannot redact non-dict" in stderr.getvalue()
 
 
 def test_run_hook_dispatches_post_tool_use(rules_dir: Path) -> None:
