@@ -214,3 +214,39 @@ def test_hook_subcommand(project_dir: Path) -> None:
     assert code == 0
     output = json.loads(out)
     assert output["continue"] is True
+
+
+def test_audit_tail(project_dir: Path) -> None:
+    """Test `redact audit tail` prints recent entries."""
+    from redaction_hooks.audit import log_event
+
+    for i in range(5):
+        log_event("PreToolUse", "block", [f"rule-{i}"], tool="Bash", project_dir=project_dir)
+    code, out, err = run_cli("audit", "tail", "-n", "3")
+    assert code == 0
+    lines = [json.loads(line) for line in out.strip().splitlines()]
+    assert [e["rule_ids"][0] for e in lines] == ["rule-2", "rule-3", "rule-4"]
+
+
+def test_audit_tail_empty(project_dir: Path) -> None:
+    """`audit tail` on a fresh project is silent and exits 0."""
+    code, out, err = run_cli("audit", "tail")
+    assert code == 0
+    assert out == ""
+
+
+def test_audit_since(project_dir: Path) -> None:
+    """`audit since` filters by age."""
+    from redaction_hooks.audit import log_event
+
+    log_event("PreToolUse", "block", ["recent"], project_dir=project_dir)
+    code, out, err = run_cli("audit", "since", "1h")
+    assert code == 0
+    assert "recent" in out
+
+
+def test_audit_since_rejects_bad_duration(project_dir: Path) -> None:
+    """An invalid duration string is reported and exits 1."""
+    code, out, err = run_cli("audit", "since", "garbage")
+    assert code == 1
+    assert "invalid duration" in err

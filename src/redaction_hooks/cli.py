@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .actions import apply_actions
+from .audit import parse_duration, read_entries
 from .config import (
     GLOBAL_RULES_DIR,
     add_hashed_rule,
@@ -193,6 +194,46 @@ def cmd_check(args: argparse.Namespace) -> int:
     return _get_check_exit_code(any_blocked, any_error, any_matched, args.quiet)
 
 
+def _audit_project_dir(global_: bool) -> Path | None:
+    return None if global_ else Path.cwd()
+
+
+def _print_entries(entries: list[dict[str, object]]) -> int:
+    for entry in entries:
+        print(json.dumps(entry, separators=(",", ":")))
+    return 0
+
+
+def cmd_audit_tail(args: argparse.Namespace) -> int:
+    """Print the last N audit entries."""
+    entries = read_entries(_audit_project_dir(args.glob))
+    return _print_entries(entries[-args.lines :] if args.lines > 0 else entries)
+
+
+def cmd_audit_since(args: argparse.Namespace) -> int:
+    """Print audit entries newer than the given duration (e.g. '1h', '7d')."""
+    from datetime import UTC, datetime, timedelta
+
+    try:
+        seconds = parse_duration(args.duration)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    cutoff = datetime.now(UTC) - timedelta(seconds=seconds)
+    entries = []
+    for entry in read_entries(_audit_project_dir(args.glob)):
+        ts = entry.get("ts")
+        if not isinstance(ts, str):
+            continue
+        try:
+            entry_time = datetime.fromisoformat(ts)
+        except ValueError:
+            continue
+        if entry_time >= cutoff:
+            entries.append(entry)
+    return _print_entries(entries)
+
+
 def cmd_claude_setup(args: argparse.Namespace) -> int:
     """Configure Claude Code hooks in settings.json."""
     if args.glob:
@@ -283,6 +324,26 @@ def main() -> int | NoReturn:
         "--global", dest="glob", action="store_true", help="Configure global settings"
     )
 
+    # audit subcommand group
+    audit_parser = subparsers.add_parser("audit", help="Read the redaction audit log")
+    audit_sub = audit_parser.add_subparsers(dest="audit_command", required=True)
+
+    audit_tail = audit_sub.add_parser("tail", help="Print the last N audit entries")
+    audit_tail.add_argument(
+        "-n", "--lines", type=int, default=20, help="Number of entries (default 20; 0 = all)"
+    )
+    audit_tail.add_argument(
+        "--global", dest="glob", action="store_true", help="Read the global audit log"
+    )
+
+    audit_since = audit_sub.add_parser(
+        "since", help="Print entries newer than DURATION (e.g. 30m, 1h, 7d)"
+    )
+    audit_since.add_argument("duration", help="Duration (e.g. 30m, 1h, 7d, 1w)")
+    audit_since.add_argument(
+        "--global", dest="glob", action="store_true", help="Read the global audit log"
+    )
+
     args = parser.parse_args()
 
     if args.command == "hook":
@@ -300,6 +361,11 @@ def main() -> int | NoReturn:
         return cmd_check(args)
     if args.command == "claude-setup":
         return cmd_claude_setup(args)
+    if args.command == "audit":
+        if args.audit_command == "tail":
+            return cmd_audit_tail(args)
+        if args.audit_command == "since":
+            return cmd_audit_since(args)
 
     parser.print_help()
     return 1

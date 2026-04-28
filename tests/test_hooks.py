@@ -653,6 +653,72 @@ rules:
     assert output["continue"] is True
 
 
+# Tests for audit-log integration
+
+
+def test_audit_logged_on_pre_tool_use_block(rules_dir: Path) -> None:
+    """A blocked PreToolUse event writes a 'block' entry to the audit log."""
+    from redaction_hooks.audit import read_entries
+
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "AKIAIOSFODNN7EXAMPLE", "file_path": "x.py"},
+    }
+    capture_output(handle_pre_tool_use, data, rules_dir)
+    entries = read_entries(rules_dir)
+    blocks = [e for e in entries if e["action"] == "block"]
+    assert blocks
+    assert blocks[-1]["hook"] == "PreToolUse"
+    assert "aws-key" in blocks[-1]["rule_ids"]
+    assert blocks[-1]["tool"] == "Write"
+
+
+def test_audit_logged_on_user_prompt_submit_block(rules_dir: Path) -> None:
+    """A blocked UserPromptSubmit event writes a 'block' entry."""
+    from redaction_hooks.audit import read_entries
+
+    data = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "my key is AKIAIOSFODNN7EXAMPLE",
+    }
+    capture_output(handle_user_prompt_submit, data, rules_dir)
+    entries = read_entries(rules_dir)
+    blocks = [e for e in entries if e["action"] == "block" and e["hook"] == "UserPromptSubmit"]
+    assert blocks
+    assert "aws-key" in blocks[0]["rule_ids"]
+
+
+def test_audit_logged_on_post_tool_use_redact(rules_dir: Path) -> None:
+    """A PostToolUse redact event writes a 'redact' entry."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_response": {"content": "contact: alice@secret.com"},
+    }
+    capture_output(handle_post_tool_use, data, rules_dir)
+    entries = read_entries(rules_dir)
+    redacts = [e for e in entries if e["action"] == "redact" and e["hook"] == "PostToolUse"]
+    assert redacts
+    assert "email" in redacts[0]["rule_ids"]
+
+
+def test_audit_not_written_when_no_match(rules_dir: Path) -> None:
+    """A clean tool input writes no audit entry."""
+    from redaction_hooks.audit import read_entries
+
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "nothing sensitive", "file_path": "x.py"},
+    }
+    capture_output(handle_pre_tool_use, data, rules_dir)
+    assert read_entries(rules_dir) == []
+
+
 # Tests for file_content_pattern feature
 
 

@@ -21,10 +21,26 @@ from pathlib import Path
 from typing import Any
 
 from .actions import apply_actions
+from .audit import log_event
 from .config import load_rules
 from .matcher import PatternMatcher
 from .models import Match, Rule
 from .path_matcher import PathMatcher
+
+
+def _audit(
+    hook: str,
+    action: str,
+    matches: list[Match],
+    *,
+    tool: str | None = None,
+    project_dir: Path | None = None,
+) -> None:
+    """Audit-log helper: extract rule IDs from matches and append a single entry."""
+    rule_ids = sorted({m.rule.id for m in matches})
+    if rule_ids:
+        log_event(hook=hook, action=action, rule_ids=rule_ids, tool=tool, project_dir=project_dir)
+
 
 # Regex to identify path-like tokens in shell commands
 _PATH_PATTERN = re.compile(r"^(?:[~/.]|/[^/])")
@@ -304,6 +320,14 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
         all_matches.extend(fc_matches)
         # Immediately block if file was unreadable
         if fc_block_reasons:
+            unreadable_ids = sorted({r.id for r in file_content_rules if r.action == "block"})
+            log_event(
+                hook="PreToolUse",
+                action="block-unreadable",
+                rule_ids=unreadable_ids,
+                tool=tool_name,
+                project_dir=project_dir,
+            )
             json.dump(_build_block_response(fc_block_reasons), sys.stdout)
             sys.stderr.write(f"Blocked: {'; '.join(fc_block_reasons)}\n")
             return 2
@@ -317,13 +341,34 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
     # Emit warnings first
     if result.warn_reasons:
         _emit_warnings(result.warn_reasons)
+    _audit(
+        "PreToolUse",
+        "warn",
+        [m for m in all_matches if m.rule.action == "warn"],
+        tool=tool_name,
+        project_dir=project_dir,
+    )
 
     if result.block_reasons:
+        _audit(
+            "PreToolUse",
+            "block",
+            [m for m in all_matches if m.rule.action == "block"],
+            tool=tool_name,
+            project_dir=project_dir,
+        )
         json.dump(_build_block_response(result.block_reasons), sys.stdout)
         sys.stderr.write(f"Blocked: {'; '.join(result.block_reasons)}\n")
         return 2
 
     if content and result.redacted_text and result.redacted_text != content:
+        _audit(
+            "PreToolUse",
+            "redact",
+            [m for m in all_matches if m.rule.action == "redact"],
+            tool=tool_name,
+            project_dir=project_dir,
+        )
         json.dump(_build_redact_response(tool_input, result.redacted_text, tool_name), sys.stdout)
         return 0
 
@@ -354,8 +399,20 @@ def handle_user_prompt_submit(data: dict[str, Any], project_dir: Path | None = N
     # Emit warnings first
     if result.warn_reasons:
         _emit_warnings(result.warn_reasons)
+    _audit(
+        "UserPromptSubmit",
+        "warn",
+        [m for m in matches if m.rule.action == "warn"],
+        project_dir=project_dir,
+    )
 
     if result.block_reasons:
+        _audit(
+            "UserPromptSubmit",
+            "block",
+            [m for m in matches if m.rule.action == "block"],
+            project_dir=project_dir,
+        )
         response = {
             "decision": "block",
             "reason": f"Prompt blocked: {'; '.join(result.block_reasons)}",
@@ -372,6 +429,7 @@ def handle_user_prompt_submit(data: dict[str, Any], project_dir: Path | None = N
     if redact_matches:
         ids = ", ".join(m.rule.id for m in redact_matches)
         sys.stderr.write(f"Warning: redact rules [{ids}] cannot modify prompts\n")
+        _audit("UserPromptSubmit", "redact", redact_matches, project_dir=project_dir)
 
     json.dump({"continue": True}, sys.stdout)
     return 0
@@ -402,11 +460,13 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
     block_reasons: list[str] = []
     warn_reasons: list[str] = []
     redacted_fields: list[tuple[str, str]] = []
+    all_matches: list[Match] = []
 
     for field_path, content in fields:
         matches = matcher.scan(content, "tool", tool_name)
         if not matches:
             continue
+        all_matches.extend(matches)
         result = apply_actions(content, matches, project_dir)
         block_reasons.extend(result.block_reasons)
         warn_reasons.extend(result.warn_reasons)
@@ -415,8 +475,22 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
 
     if warn_reasons:
         _emit_warnings(warn_reasons)
+    _audit(
+        "PostToolUse",
+        "warn",
+        [m for m in all_matches if m.rule.action == "warn"],
+        tool=tool_name,
+        project_dir=project_dir,
+    )
 
     if block_reasons:
+        _audit(
+            "PostToolUse",
+            "block",
+            [m for m in all_matches if m.rule.action == "block"],
+            tool=tool_name,
+            project_dir=project_dir,
+        )
         response = {
             "decision": "block",
             "reason": f"Tool output blocked: {'; '.join(block_reasons)}",
@@ -426,18 +500,26 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
         sys.stderr.write(f"Tool output blocked: {'; '.join(block_reasons)}\n")
         return 2
 
+    redact_matches = [m for m in all_matches if m.rule.action == "redact"]
+
     if not redacted_fields:
+        # Redact rules may have matched but produced no text change (e.g. mapping
+        # collision producing same string), or there were no redact matches at all.
+        if redact_matches:
+            _audit("PostToolUse", "redact", redact_matches, tool=tool_name, project_dir=project_dir)
         json.dump({"continue": True}, sys.stdout)
         return 0
 
     if not isinstance(tool_response, dict):
         sys.stderr.write(f"Warning: cannot redact non-dict tool_response for {tool_name}\n")
+        _audit("PostToolUse", "redact", redact_matches, tool=tool_name, project_dir=project_dir)
         json.dump({"continue": True}, sys.stdout)
         return 0
 
     for field_path, redacted in redacted_fields:
         _set_output_field(tool_response, field_path, redacted)
 
+    _audit("PostToolUse", "redact", redact_matches, tool=tool_name, project_dir=project_dir)
     response = {
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
