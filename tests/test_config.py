@@ -210,6 +210,27 @@ rules:
     assert any("mutually exclusive" in e for e in errors)
 
 
+def test_validate_rejects_file_content_pattern_with_redact(tmp_rules_file: Path) -> None:
+    """Test validation rejects 'file_content_pattern' with action 'redact' (silent no-op)."""
+    from redaction_hooks.config import validate_rules_file
+
+    tmp_rules_file.write_text("""
+rules:
+  - id: bogus
+    file_content_pattern: "kind: Secret"
+    action: redact
+    replacement: "***"
+""")
+    errors = validate_rules_file(tmp_rules_file)
+    assert any("file_content_pattern" in e and "redact" in e for e in errors)
+
+
+def test_rule_rejects_file_content_pattern_with_redact() -> None:
+    """Test direct Rule construction rejects file_content_pattern + action 'redact'."""
+    with pytest.raises(ValueError, match="file_content_pattern.*redact"):
+        Rule(id="bad", file_content_pattern="kind: Secret", action="redact")
+
+
 def test_validate_invalid_regex(tmp_rules_file: Path) -> None:
     """Test validation catches invalid regex patterns."""
     from redaction_hooks.config import validate_rules_file

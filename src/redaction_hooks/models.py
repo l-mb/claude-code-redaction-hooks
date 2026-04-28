@@ -52,6 +52,11 @@ class Rule:
             raise ValueError(
                 f"Rule '{self.id}': pattern and file_content_pattern are mutually exclusive"
             )
+        if self.file_content_pattern and self.action == "redact":
+            raise ValueError(
+                f"Rule '{self.id}': file_content_pattern with action 'redact' has no effect; "
+                "use 'block' or 'warn'"
+            )
 
 
 @dataclass

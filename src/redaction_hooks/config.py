@@ -182,6 +182,12 @@ def _validate_rule(rule: dict[str, Any], index: int, seen_ids: set[str]) -> list
             "(combining them would silently ignore 'pattern')"
         )
 
+    if has_file_content_pattern and rule.get("action") == "redact":
+        errors.append(
+            f"{prefix}: 'file_content_pattern' with action 'redact' has no effect "
+            "(file content is not modified); use action 'block' or 'warn'"
+        )
+
     if has_pattern and rule.get("is_regex", True) and not rule.get("hashed", False):
         try:
             re.compile(rule["pattern"])
