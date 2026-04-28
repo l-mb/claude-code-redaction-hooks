@@ -239,6 +239,7 @@ _HOOK_EVENT_MATCHERS: dict[str, str | None] = {
     "PreToolUse": "Write|Edit|Bash",
     "PostToolUse": "Read|Bash|Grep|Glob|WebFetch",
     "UserPromptSubmit": None,
+    "PreCompact": None,  # both manual /compact and auto compaction
 }
 
 

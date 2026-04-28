@@ -997,6 +997,204 @@ rules:
     assert output["continue"] is True
 
 
+# Tests for PreCompact handler
+
+
+def _write_transcript(path: Path, *messages: dict[str, Any]) -> None:
+    """Write a JSONL transcript file."""
+    path.write_text("".join(json.dumps(m) + "\n" for m in messages))
+
+
+def test_pre_compact_blocks_when_transcript_contains_secret(tmp_path: Path) -> None:
+    """PreCompact blocks compaction if a block-action rule matches the transcript."""
+    from redaction_hooks.hooks import handle_pre_compact
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(
+        transcript,
+        {"type": "user", "content": "hello"},
+        {"type": "assistant", "content": "your key is AKIAIOSFODNN7EXAMPLE"},
+    )
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreCompact",
+        "transcript_path": str(transcript),
+        "trigger": "auto",
+    }
+    code, output = capture_output(handle_pre_compact, data, tmp_path)
+    assert code == 2
+    assert output["decision"] == "block"
+    assert "aws-key" in output["reason"]
+    assert "trigger=auto" in output["reason"]
+
+
+def test_pre_compact_allows_clean_transcript(tmp_path: Path) -> None:
+    """PreCompact allows compaction when no block rule matches."""
+    from redaction_hooks.hooks import handle_pre_compact
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(
+        transcript,
+        {"type": "user", "content": "what is the weather"},
+        {"type": "assistant", "content": "I cannot check the weather"},
+    )
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreCompact",
+        "transcript_path": str(transcript),
+        "trigger": "manual",
+    }
+    code, output = capture_output(handle_pre_compact, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+
+
+def test_pre_compact_warns_on_redact_rule_match(tmp_path: Path) -> None:
+    """Redact rules cannot rewrite a compaction summary; warn + audit only."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_pre_compact
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, {"type": "user", "content": "contact alice@secret.com"})
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: email-redact
+    pattern: '[a-z]+@secret\\.com'
+    action: redact
+    replacement: email
+""")
+    data = {
+        "hook_event_name": "PreCompact",
+        "transcript_path": str(transcript),
+        "trigger": "auto",
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_pre_compact, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+    assert "redact rules" in stderr.getvalue()
+    entries = read_entries(tmp_path)
+    redacts = [e for e in entries if e["hook"] == "PreCompact" and e["action"] == "redact"]
+    assert redacts
+
+
+def test_pre_compact_skips_target_tool_only_rules(tmp_path: Path) -> None:
+    """Rules with target=tool do not apply to PreCompact (which targets the LLM)."""
+    from redaction_hooks.hooks import handle_pre_compact
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, {"type": "assistant", "content": "AKIAIOSFODNN7EXAMPLE"})
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-tool-only
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PreCompact",
+        "transcript_path": str(transcript),
+        "trigger": "manual",
+    }
+    code, output = capture_output(handle_pre_compact, data, tmp_path)
+    assert code == 0
+
+
+def test_pre_compact_handles_unreadable_transcript(tmp_path: Path) -> None:
+    """A missing or unreadable transcript_path emits stderr and allows compaction."""
+    from redaction_hooks.hooks import handle_pre_compact
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreCompact",
+        "transcript_path": str(tmp_path / "nonexistent.jsonl"),
+        "trigger": "auto",
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_pre_compact, data, tmp_path)
+    assert code == 0
+    assert "cannot read transcript" in stderr.getvalue()
+
+
+def test_pre_compact_skips_malformed_jsonl_lines(tmp_path: Path) -> None:
+    """Malformed lines in the transcript are skipped without crashing."""
+    from redaction_hooks.hooks import handle_pre_compact
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        '{"type":"user","content":"hello"}\n'
+        "this is not json\n"
+        '{"type":"assistant","content":"AKIAIOSFODNN7EXAMPLE"}\n'
+    )
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreCompact",
+        "transcript_path": str(transcript),
+        "trigger": "manual",
+    }
+    code, output = capture_output(handle_pre_compact, data, tmp_path)
+    assert code == 2  # still found the secret on line 3
+
+
+def test_pre_compact_no_transcript_path_allows(tmp_path: Path) -> None:
+    """Missing transcript_path field allows compaction (no-op)."""
+    from redaction_hooks.hooks import handle_pre_compact
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {"hook_event_name": "PreCompact", "trigger": "manual"}
+    code, output = capture_output(handle_pre_compact, data, tmp_path)
+    assert code == 0
+
+
+def test_run_hook_dispatches_pre_compact(tmp_path: Path) -> None:
+    """run_hook routes PreCompact events to handle_pre_compact."""
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, {"type": "user", "content": "clean"})
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreCompact",
+        "transcript_path": str(transcript),
+        "trigger": "auto",
+    }
+    stdin = io.StringIO(json.dumps(data))
+    stdout = io.StringIO()
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+        code = run_hook(tmp_path)
+    assert code == 0
+
+
 # Tests for path-traversal / symlink hardening (#4)
 
 

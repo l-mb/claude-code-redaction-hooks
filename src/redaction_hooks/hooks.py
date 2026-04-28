@@ -17,6 +17,7 @@
 import json
 import re
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -591,6 +592,100 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
     return 0
 
 
+def _walk_strings(obj: Any) -> Iterator[str]:
+    """Yield every string leaf in a JSON-shaped object (recursively)."""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _walk_strings(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk_strings(item)
+
+
+def handle_pre_compact(data: dict[str, Any], project_dir: Path | None = None) -> int:
+    """Handle PreCompact hook - scan the transcript before context compaction.
+
+    PreCompact passes `transcript_path` (a JSONL session log) on stdin rather
+    than the messages inline. Compaction summarizes the transcript into a new
+    context message; secrets present in earlier turns can leak into the summary
+    even if they were blocked at the input layer. This handler scans the
+    transcript and blocks compaction if a block-action rule matches.
+
+    PreCompact cannot rewrite the summary, so warn and redact rules are audited
+    and warned-to-stderr but allow compaction to proceed.
+    """
+    transcript_path = data.get("transcript_path", "")
+    trigger = data.get("trigger", "unknown")
+
+    if not transcript_path:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    rules = load_rules(project_dir)
+    llm_rules = [r for r in rules if r.target in ("llm", "both")]
+    if not llm_rules:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    try:
+        with Path(transcript_path).open(encoding="utf-8", errors="replace") as f:
+            transcript_lines = f.readlines()
+    except OSError as e:
+        sys.stderr.write(f"PreCompact: cannot read transcript {transcript_path}: {e}\n")
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    matcher = PatternMatcher(llm_rules)
+    all_matches: list[Match] = []
+    for line in transcript_lines:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        for text in _walk_strings(obj):
+            all_matches.extend(matcher.scan(text, "llm"))
+
+    if not all_matches:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    block_matches = [m for m in all_matches if m.rule.action == "block"]
+    warn_matches = [m for m in all_matches if m.rule.action == "warn"]
+    redact_matches = [m for m in all_matches if m.rule.action == "redact"]
+
+    if warn_matches:
+        ids = sorted({m.rule.id for m in warn_matches})
+        sys.stderr.write(f"PreCompact warning: rules {ids} matched in transcript\n")
+        _audit("PreCompact", "warn", warn_matches, project_dir=project_dir)
+
+    if redact_matches:
+        ids = sorted({m.rule.id for m in redact_matches})
+        sys.stderr.write(
+            f"PreCompact warning: redact rules {ids} matched but cannot rewrite "
+            "the compacted summary; consider blocking instead\n"
+        )
+        _audit("PreCompact", "redact", redact_matches, project_dir=project_dir)
+
+    if block_matches:
+        ids = sorted({m.rule.id for m in block_matches})
+        _audit("PreCompact", "block", block_matches, project_dir=project_dir)
+        response = {
+            "decision": "block",
+            "reason": (
+                f"Compaction blocked: rules {ids} matched in transcript (trigger={trigger})"
+            ),
+            "hookSpecificOutput": {"hookEventName": "PreCompact"},
+        }
+        json.dump(response, sys.stdout)
+        sys.stderr.write(f"PreCompact blocked: rules {ids} matched\n")
+        return 2
+
+    json.dump({"continue": True}, sys.stdout)
+    return 0
+
+
 def run_hook(project_dir: Path | None = None) -> int:
     """Main hook entry point. Reads JSON from stdin, dispatches to handler."""
     try:
@@ -607,6 +702,8 @@ def run_hook(project_dir: Path | None = None) -> int:
         return handle_post_tool_use(data, project_dir)
     if event == "UserPromptSubmit":
         return handle_user_prompt_submit(data, project_dir)
+    if event == "PreCompact":
+        return handle_pre_compact(data, project_dir)
 
     # Unknown or unsupported event, allow to continue
     json.dump({"continue": True}, sys.stdout)
