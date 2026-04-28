@@ -995,3 +995,164 @@ rules:
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
     assert code == 0
     assert output["continue"] is True
+
+
+# Tests for path-traversal / symlink hardening (#4)
+
+
+def test_file_content_blocks_absolute_path_outside_project(tmp_path: Path) -> None:
+    """A file_content rule must refuse to scan files resolving outside project_dir."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-proprietary
+    file_content_pattern: 'PROPRIETARY'
+    file_tools: read
+    action: warn
+""")
+    # /etc/hostname exists on Linux and is outside tmp_path
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": "/etc/hostname"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    # Even with warn-action, outside-project blocks (refuse to assess)
+    assert code == 2
+    assert "outside project boundary" in output["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_file_content_blocks_symlink_pointing_outside(tmp_path: Path) -> None:
+    """A symlink inside project pointing outside is rejected after resolve()."""
+    link = tmp_path / "looks-local.txt"
+    link.symlink_to("/etc/hostname")
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: warn-anything
+    file_content_pattern: '.'
+    file_tools: read
+    action: warn
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(link)},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+    assert "outside project boundary" in output["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_file_content_allows_path_inside_project(tmp_path: Path) -> None:
+    """Sanity: paths inside project are still scanned normally."""
+    target = tmp_path / "ok.txt"
+    target.write_text("nothing special here")
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: warn-anything
+    file_content_pattern: '.'
+    file_tools: read
+    action: warn
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(target)},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+
+
+# Tests for _extract_bash_paths
+
+
+def test_bash_paths_compound_command(tmp_path: Path) -> None:
+    """Each subcommand in a compound bash command is tokenized independently."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    paths = _extract_bash_paths("cd /tmp && cat /etc/hosts || rm /var/log/x")
+    assert "/tmp" in paths
+    assert "/etc/hosts" in paths
+    assert "/var/log/x" in paths
+    assert "&&" not in paths
+    assert "||" not in paths
+
+
+def test_bash_paths_handles_pipe_and_semicolons(tmp_path: Path) -> None:
+    """Commands joined by | or ; are split into independent subcommands."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    paths = _extract_bash_paths("cat /etc/hosts | grep foo ; head /etc/passwd")
+    assert "/etc/hosts" in paths
+    assert "/etc/passwd" in paths
+    assert "foo" not in paths
+
+
+def test_bash_paths_extracts_value_from_flag_assignment(tmp_path: Path) -> None:
+    """`--key=value` contributes the value, not the whole `--key=value` token."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    paths = _extract_bash_paths("cmd --output=/tmp/out --dir=/var/log -o=/tmp/x")
+    assert "/tmp/out" in paths
+    assert "/var/log" in paths
+    assert "/tmp/x" in paths
+    assert "--output=/tmp/out" not in paths
+
+
+def test_bash_paths_skips_bare_flags(tmp_path: Path) -> None:
+    """Flags without `=` are not extracted as paths."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    paths = _extract_bash_paths("git commit --no-verify -m 'msg'")
+    assert "--no-verify" not in paths
+    assert "-m" not in paths
+    # `msg` has no /. and is not a flag -> not a path
+    assert "msg" not in paths
+
+
+def test_bash_paths_skips_non_path_tokens(tmp_path: Path) -> None:
+    """Tokens that look like config values, not paths, are not extracted."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    paths = _extract_bash_paths("git config user.email alice@example.com")
+    assert "alice@example.com" not in paths
+    assert "user.email" not in paths
+    assert "config" not in paths
+
+
+def test_bash_paths_url_in_flag_value_skipped(tmp_path: Path) -> None:
+    """A URL embedded in `--key=URL` is not classified as a path."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    paths = _extract_bash_paths("curl --url=https://example.com -o /tmp/x")
+    assert "/tmp/x" in paths
+    assert not any(p.startswith("http") for p in paths)
+
+
+def test_bash_paths_falls_back_on_unbalanced_quotes(tmp_path: Path) -> None:
+    """Malformed (unclosed) shell input still yields paths via regex fallback."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    paths = _extract_bash_paths("cat /etc/passwd 'unterminated")  # unclosed quote
+    assert any("/etc/passwd" in p for p in paths)
+
+
+# Tests for PathMatcher resolve-warning
+
+
+def test_path_matcher_warns_on_resolve_failure(tmp_path: Path) -> None:
+    """A transient OSError from Path.resolve() emits a stderr warning."""
+    from unittest.mock import patch
+
+    from redaction_hooks.models import Rule
+    from redaction_hooks.path_matcher import PathMatcher
+
+    rule = Rule(id="r", path_pattern="/anywhere/*", action="block")
+    matcher = PathMatcher([rule], tmp_path)
+    stderr = io.StringIO()
+    with (
+        patch("pathlib.Path.resolve", side_effect=OSError("simulated FS error")),
+        patch.object(sys, "stderr", stderr),
+    ):
+        matcher.scan(["/anywhere/x"], "tool", "Read")
+    assert "cannot resolve" in stderr.getvalue()

@@ -14,6 +14,7 @@
 
 """Path-based matching for file access control."""
 
+import sys
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Literal
@@ -29,15 +30,23 @@ class PathMatcher:
         self.project_dir = project_dir or Path.cwd()
 
     def _normalize_path(self, path: str) -> Path:
-        """Normalize a path for matching."""
-        # Expand ~ to home directory
+        """Resolve symlinks and produce an absolute path for matching.
+
+        On filesystem errors during resolve() the unresolved absolute form is
+        used (so the rule still has SOMETHING to match against), but a stderr
+        warning surfaces the failure -- otherwise a path-pattern rule could be
+        silently bypassed by a transient filesystem error on a symlink target.
+        """
         p = Path(path).expanduser()
         if not p.is_absolute():
             p = self.project_dir / p
         try:
             return p.resolve()
-        except OSError:
-            # Path may not exist, just return absolute form
+        except OSError as e:
+            sys.stderr.write(
+                f"redaction_hooks: cannot resolve '{path}' for path matching, "
+                f"using unresolved form (symlink target may differ): {e}\n"
+            )
             return p.absolute()
 
     def _match_pattern(self, pattern: str, path: Path) -> bool:

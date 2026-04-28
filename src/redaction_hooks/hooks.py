@@ -42,11 +42,14 @@ def _audit(
         log_event(hook=hook, action=action, rule_ids=rule_ids, tool=tool, project_dir=project_dir)
 
 
-# Regex to identify path-like tokens in shell commands
-_PATH_PATTERN = re.compile(r"^(?:[~/.]|/[^/])")
+# Regex to identify path-like tokens in shell commands (starts with ~, ., or /)
+_PATH_PATTERN = re.compile(r"^[~./]")
 _URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 # Fallback regex for path extraction when shlex fails
 _FALLBACK_PATH_RE = re.compile(r"(?:^|[\s;|&])([~/][^\s;|&]+|\.\.?/[^\s;|&]+)")
+# Splits a compound shell command on ; && || | newline so each subcommand
+# can be tokenized independently
+_SHELL_SEPARATORS = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
 
 # Tools that operate on files for file_tools filtering
 _READ_TOOLS = {"Read"}
@@ -54,24 +57,50 @@ _WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 _FILE_TOOLS = _READ_TOOLS | _WRITE_TOOLS
 
 
+def _extract_path_from_token(token: str) -> str | None:
+    """Decide whether a single shell token contains a path; return the path or None."""
+    if not token or _URL_PATTERN.match(token):
+        return None
+    if token.startswith("-"):
+        # Flag with embedded value: --key=value or -k=value -- pull out the value
+        if "=" in token:
+            value = token.split("=", 1)[1]
+            if (
+                value
+                and not _URL_PATTERN.match(value)
+                and (_PATH_PATTERN.match(value) or "/" in value)
+            ):
+                return value
+        return None
+    if _PATH_PATTERN.match(token) or "/" in token:
+        return token
+    return None
+
+
 def _extract_bash_paths(command: str) -> list[str]:
-    """Extract path-like tokens from a shell command."""
+    """Extract path-like tokens from a shell command.
+
+    Compound commands are split on `;`, `&&`, `||`, `|`, and newlines so each
+    subcommand is tokenized independently. A token is a path if it starts with
+    `/`, `./`, `../`, or `~`, or if it contains `/` and is not a flag.
+    `--key=value` tokens contribute `value` (not the whole `--key=value`).
+    """
     import shlex
 
     paths: list[str] = []
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        # Malformed command (unclosed quotes), fall back to regex
-        return [m.group(1) for m in _FALLBACK_PATH_RE.finditer(command)]
-
-    for token in tokens:
-        # Skip URLs
-        if _URL_PATTERN.match(token):
+    for subcommand in _SHELL_SEPARATORS.split(command):
+        if not subcommand.strip():
             continue
-        # Check if token looks like a path
-        if _PATH_PATTERN.match(token) or "/" in token:
-            paths.append(token)
+        try:
+            tokens = shlex.split(subcommand)
+        except ValueError:
+            # Unclosed quotes etc -- fall back to a regex sweep over the original
+            paths.extend(m.group(1) for m in _FALLBACK_PATH_RE.finditer(subcommand))
+            continue
+        for token in tokens:
+            extracted = _extract_path_from_token(token)
+            if extracted is not None:
+                paths.append(extracted)
     return paths
 
 
@@ -92,16 +121,35 @@ def _emit_warnings(warn_reasons: list[str]) -> None:
         sys.stderr.write(f"Warning: {reason}\n")
 
 
-def _read_file_head(path: str, lines: int = 100) -> str | None:
-    """Read the first N lines of a file. Returns None if unreadable."""
+def _read_file_head(
+    path: str,
+    project_dir: Path | None = None,
+    lines: int = 100,
+) -> tuple[str | None, str | None]:
+    """Read first N lines of `path`, refusing reads outside `project_dir`.
+
+    Symlinks are resolved before the boundary check so a symlink inside the
+    project pointing at /etc/passwd is rejected. Returns (content, error):
+    on success (text, None); on refusal/error (None, human-readable reason).
+    """
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        base = project_dir if project_dir is not None else Path.cwd()
+        p = base / p
     try:
-        p = Path(path).expanduser()
-        if not p.is_absolute():
-            p = Path.cwd() / p
-        with p.open(encoding="utf-8", errors="replace") as f:
-            return "".join(line for _, line in zip(range(lines), f, strict=False))
-    except (OSError, UnicodeDecodeError):
-        return None
+        resolved = p.resolve()
+    except OSError as e:
+        return None, f"cannot resolve path '{path}': {e}"
+    if project_dir is not None:
+        try:
+            resolved.relative_to(project_dir.resolve())
+        except ValueError:
+            return None, f"path '{path}' resolves outside project boundary"
+    try:
+        with resolved.open(encoding="utf-8", errors="replace") as f:
+            return "".join(line for _, line in zip(range(lines), f, strict=False)), None
+    except (OSError, UnicodeDecodeError) as e:
+        return None, f"cannot read '{path}': {e}"
 
 
 def _file_tools_matches(file_tools: str | None, tool_name: str) -> bool:
@@ -216,10 +264,16 @@ def _check_file_content_rules(
     rules: list[Rule],
     paths: list[str],
     tool_name: str,
+    project_dir: Path | None = None,
 ) -> tuple[list[Match], list[str]]:
     """Check file_content_pattern rules against file contents.
 
-    Returns (matches, block_reasons_for_unreadable_files).
+    Paths that resolve outside `project_dir` always block, regardless of rule
+    action -- a security tool should refuse to assess files outside its scope.
+    Other unreadable cases preserve the older behavior: block only if a
+    block-action rule could have applied.
+
+    Returns (matches, block_reasons).
     """
 
     file_content_rules: list[Rule] = [
@@ -232,18 +286,24 @@ def _check_file_content_rules(
     block_reasons: list[str] = []
 
     for path in paths:
-        file_content = _read_file_head(path)
+        file_content, error = _read_file_head(path, project_dir)
         if file_content is None:
-            # File unreadable - block if any file_content rule could apply
+            is_outside = error is not None and "outside project boundary" in error
+            if is_outside:
+                ids = sorted({r.id for r in file_content_rules})
+                block_reasons.append(f"file_content rule(s) {ids}: {error}")
+                continue
             applicable = [r for r in file_content_rules if r.action == "block"]
             if applicable:
-                block_reasons.append(f"Cannot read file '{path}' for content check")
+                block_reasons.append(
+                    f"Cannot read file '{path}' for content check" + (f": {error}" if error else "")
+                )
             continue
 
         for rule in file_content_rules:
             # If rule also has path_pattern, check path first
             if rule.path_pattern:
-                pm = PathMatcher([rule])
+                pm = PathMatcher([rule], project_dir)
                 if not pm.scan([path], "tool", tool_name):
                     continue
 
@@ -315,7 +375,7 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
     file_content_rules = [r for r in rules if r.file_content_pattern]
     if paths and file_content_rules:
         fc_matches, fc_block_reasons = _check_file_content_rules(
-            file_content_rules, paths, tool_name
+            file_content_rules, paths, tool_name, project_dir
         )
         all_matches.extend(fc_matches)
         # Immediately block if file was unreadable
