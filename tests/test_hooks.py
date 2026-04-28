@@ -481,3 +481,281 @@ rules:
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
     assert code == 0
     assert output["continue"] is True
+
+
+# Tests for file_content_pattern feature
+
+
+def test_file_content_blocks_read_with_matching_content(tmp_path: Path) -> None:
+    """Test file_content_pattern blocks Read when file contains matching pattern."""
+    # Create target file with proprietary header
+    target = tmp_path / "secret.txt"
+    target.write_text("PROPRIETARY AND CONFIDENTIAL\nThis is secret content.")
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-proprietary
+    file_content_pattern: 'PROPRIETARY AND CONFIDENTIAL'
+    file_tools: read
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(target)},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+    assert output["continue"] is False
+    assert "block-proprietary" in output["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_file_content_allows_read_without_matching_content(tmp_path: Path) -> None:
+    """Test file_content_pattern allows Read when file doesn't contain pattern."""
+    target = tmp_path / "public.txt"
+    target.write_text("This is public content.\nNo secrets here.")
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-proprietary
+    file_content_pattern: 'PROPRIETARY AND CONFIDENTIAL'
+    file_tools: read
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(target)},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True
+
+
+def test_file_content_blocks_edit_with_file_tools_write(tmp_path: Path) -> None:
+    """Test file_content_pattern with file_tools=write blocks Edit tool."""
+    target = tmp_path / "generated.py"
+    target.write_text("# DO NOT EDIT - auto generated\ncode = 42")
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-generated
+    file_content_pattern: 'DO NOT EDIT'
+    file_tools: write
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(target), "old_string": "42", "new_string": "43"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+    assert output["continue"] is False
+
+
+def test_file_content_allows_read_with_file_tools_write(tmp_path: Path) -> None:
+    """Test file_content_pattern with file_tools=write allows Read tool."""
+    target = tmp_path / "generated.py"
+    target.write_text("# DO NOT EDIT - auto generated\ncode = 42")
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-generated
+    file_content_pattern: 'DO NOT EDIT'
+    file_tools: write
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(target)},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True
+
+
+def test_file_content_rw_blocks_both_read_and_write(tmp_path: Path) -> None:
+    """Test file_tools=rw blocks both Read and Write/Edit tools."""
+    target = tmp_path / "secret.yaml"
+    target.write_text("kind: Secret\ndata: abc123")
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-k8s-secret
+    file_content_pattern: 'kind:\\s*Secret'
+    file_tools: rw
+    action: block
+""")
+    # Read blocked
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(target)},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+
+    # Edit blocked
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(target), "old_string": "abc", "new_string": "xyz"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+
+
+def test_file_content_unreadable_file_blocks(tmp_path: Path) -> None:
+    """Test that unreadable file blocks when file_content rule exists."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-proprietary
+    file_content_pattern: 'PROPRIETARY'
+    file_tools: read
+    action: block
+""")
+    # Non-existent file
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(tmp_path / "nonexistent.txt")},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+    assert "Cannot read file" in output["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_file_content_combined_with_path_pattern(tmp_path: Path) -> None:
+    """Test file_content_pattern combined with path_pattern."""
+    target = tmp_path / "config.yaml"
+    target.write_text("kind: Secret\ndata: password123")
+
+    other = tmp_path / "config.json"
+    other.write_text("kind: Secret\ndata: password123")
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-yaml-secret
+    path_pattern: '*.yaml'
+    file_content_pattern: 'kind:\\s*Secret'
+    file_tools: rw
+    action: block
+""")
+    # YAML with Secret: blocked
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(target)},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+
+    # JSON with same content: allowed (path doesn't match)
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(other)},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+
+
+def test_file_content_only_checks_first_100_lines(tmp_path: Path) -> None:
+    """Test that file_content_pattern only checks first 100 lines."""
+    # Create file with secret on line 101
+    lines = ["safe content\n"] * 100 + ["PROPRIETARY AND CONFIDENTIAL\n"]
+    target = tmp_path / "bigfile.txt"
+    target.write_text("".join(lines))
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-proprietary
+    file_content_pattern: 'PROPRIETARY AND CONFIDENTIAL'
+    file_tools: read
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(target)},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    # Should NOT block because secret is on line 101
+    assert code == 0
+    assert output["continue"] is True
+
+
+def test_file_content_blocks_within_first_100_lines(tmp_path: Path) -> None:
+    """Test that file_content_pattern blocks when pattern is within first 100 lines."""
+    # Create file with secret on line 50
+    lines = ["safe content\n"] * 49 + ["PROPRIETARY AND CONFIDENTIAL\n"] + ["more safe\n"] * 50
+    target = tmp_path / "bigfile.txt"
+    target.write_text("".join(lines))
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-proprietary
+    file_content_pattern: 'PROPRIETARY AND CONFIDENTIAL'
+    file_tools: read
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(target)},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+    assert output["continue"] is False
+
+
+def test_file_content_warn_action(tmp_path: Path) -> None:
+    """Test file_content_pattern with warn action."""
+    target = tmp_path / "warning.txt"
+    target.write_text("This file contains SENSITIVE information")
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: warn-sensitive
+    file_content_pattern: 'SENSITIVE'
+    file_tools: rw
+    action: warn
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(target)},
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True
+    assert "Warning" in stderr.getvalue()
+    assert "warn-sensitive" in stderr.getvalue()
+
+
+def test_file_content_ignores_non_file_tools(tmp_path: Path) -> None:
+    """Test file_content_pattern does not apply to non-file tools like Bash."""
+    target = tmp_path / "secret.sh"
+    target.write_text("PROPRIETARY AND CONFIDENTIAL\necho hello")
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: block-proprietary
+    file_content_pattern: 'PROPRIETARY AND CONFIDENTIAL'
+    action: block
+""")
+    # Bash command mentioning the file (not Read/Write/Edit)
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": f"cat {target}"},
+    }
+    # Should be allowed - file_content rules don't apply to Bash tool execution
+    # (even though path is extracted, file_tools filter excludes Bash)
+    code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True

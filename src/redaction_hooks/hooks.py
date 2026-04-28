@@ -23,12 +23,19 @@ from typing import Any
 from .actions import apply_actions
 from .config import load_rules
 from .matcher import PatternMatcher
+from .models import Match, Rule
+from .path_matcher import PathMatcher
 
 # Regex to identify path-like tokens in shell commands
 _PATH_PATTERN = re.compile(r"^(?:[~/.]|/[^/])")
 _URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 # Fallback regex for path extraction when shlex fails
 _FALLBACK_PATH_RE = re.compile(r"(?:^|[\s;|&])([~/][^\s;|&]+|\.\.?/[^\s;|&]+)")
+
+# Tools that operate on files for file_tools filtering
+_READ_TOOLS = {"Read"}
+_WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
+_FILE_TOOLS = _READ_TOOLS | _WRITE_TOOLS
 
 
 def _extract_bash_paths(command: str) -> list[str]:
@@ -67,6 +74,31 @@ def _emit_warnings(warn_reasons: list[str]) -> None:
     """Write warning messages to stderr."""
     for reason in warn_reasons:
         sys.stderr.write(f"Warning: {reason}\n")
+
+
+def _read_file_head(path: str, lines: int = 100) -> str | None:
+    """Read the first N lines of a file. Returns None if unreadable."""
+    try:
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        with p.open(encoding="utf-8", errors="replace") as f:
+            return "".join(line for _, line in zip(range(lines), f, strict=False))
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _file_tools_matches(file_tools: str | None, tool_name: str) -> bool:
+    """Check if tool_name matches the file_tools filter."""
+    if file_tools is None:
+        return tool_name in _FILE_TOOLS
+    if file_tools == "read":
+        return tool_name in _READ_TOOLS
+    if file_tools == "write":
+        return tool_name in _WRITE_TOOLS
+    if file_tools == "rw":
+        return tool_name in _FILE_TOOLS
+    return False
 
 
 def _get_tool_input_content(tool_name: str, tool_input: dict[str, Any]) -> str | None:
@@ -156,11 +188,61 @@ def _build_redact_response(
     }
 
 
+def _check_file_content_rules(
+    rules: list[Rule],
+    paths: list[str],
+    tool_name: str,
+) -> tuple[list[Match], list[str]]:
+    """Check file_content_pattern rules against file contents.
+
+    Returns (matches, block_reasons_for_unreadable_files).
+    """
+
+    file_content_rules: list[Rule] = [
+        r for r in rules if r.file_content_pattern and _file_tools_matches(r.file_tools, tool_name)
+    ]
+    if not file_content_rules or not paths:
+        return [], []
+
+    matches: list[Match] = []
+    block_reasons: list[str] = []
+
+    for path in paths:
+        file_content = _read_file_head(path)
+        if file_content is None:
+            # File unreadable - block if any file_content rule could apply
+            applicable = [r for r in file_content_rules if r.action == "block"]
+            if applicable:
+                block_reasons.append(f"Cannot read file '{path}' for content check")
+            continue
+
+        for rule in file_content_rules:
+            # If rule also has path_pattern, check path first
+            if rule.path_pattern:
+                pm = PathMatcher([rule])
+                if not pm.scan([path], "tool", tool_name):
+                    continue
+
+            # Match file_content_pattern against file content
+            # rule.file_content_pattern is guaranteed non-None by filter above
+            assert rule.file_content_pattern is not None
+            compiled = re.compile(rule.file_content_pattern)
+            m = compiled.search(file_content)
+            if m:
+                matches.append(
+                    Match(
+                        rule=rule,
+                        start=m.start(),
+                        end=m.end(),
+                        text=m.group(0),
+                    )
+                )
+
+    return matches, block_reasons
+
+
 def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -> int:
     """Handle PreToolUse hook event."""
-    from .models import Match
-    from .path_matcher import PathMatcher
-
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
 
@@ -169,10 +251,16 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
         json.dump({"continue": True}, sys.stdout)
         return 0
 
-    # Separate rules into categories
-    path_only_rules = [r for r in rules if r.path_pattern and not r.pattern]
-    content_only_rules = [r for r in rules if r.pattern and not r.path_pattern]
-    combined_rules = [r for r in rules if r.path_pattern and r.pattern]
+    # Separate rules into categories (excluding file_content_pattern rules)
+    path_only_rules = [
+        r for r in rules if r.path_pattern and not r.pattern and not r.file_content_pattern
+    ]
+    content_only_rules = [
+        r for r in rules if r.pattern and not r.path_pattern and not r.file_content_pattern
+    ]
+    combined_rules = [
+        r for r in rules if r.path_pattern and r.pattern and not r.file_content_pattern
+    ]
 
     all_matches: list[Match] = []
     paths = _get_tool_input_paths(tool_name, tool_input)
@@ -198,6 +286,19 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
         if content_rules:
             content_matcher = PatternMatcher(content_rules)
             all_matches.extend(content_matcher.scan(content, "tool", tool_name))
+
+    # Check file_content_pattern rules (reads actual file content)
+    file_content_rules = [r for r in rules if r.file_content_pattern]
+    if paths and file_content_rules:
+        fc_matches, fc_block_reasons = _check_file_content_rules(
+            file_content_rules, paths, tool_name
+        )
+        all_matches.extend(fc_matches)
+        # Immediately block if file was unreadable
+        if fc_block_reasons:
+            json.dump(_build_block_response(fc_block_reasons), sys.stdout)
+            sys.stderr.write(f"Blocked: {'; '.join(fc_block_reasons)}\n")
+            return 2
 
     if not all_matches:
         json.dump({"continue": True}, sys.stdout)

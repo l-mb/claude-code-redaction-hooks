@@ -101,6 +101,33 @@ rules:
     tool: Bash
     description: Block recursive rm on home directories
 
+  # File content-based rules (checks first 100 lines of target file)
+  - id: block-proprietary-read
+    file_content_pattern: 'PROPRIETARY AND CONFIDENTIAL'
+    file_tools: read
+    action: block
+    description: Block reading files marked as proprietary
+
+  - id: block-proprietary-write
+    file_content_pattern: 'PROPRIETARY AND CONFIDENTIAL'
+    file_tools: write
+    action: block
+    description: Block modifying files marked as proprietary
+
+  - id: block-generated-edit
+    file_content_pattern: 'DO NOT EDIT.*generated'
+    file_tools: write
+    action: block
+    description: Block editing auto-generated files
+
+  # Combined path + file content rules
+  - id: block-sensitive-config
+    path_pattern: '*.yaml'
+    file_content_pattern: 'kind:\s*Secret'
+    file_tools: rw
+    action: block
+    description: Block access to Kubernetes secrets
+
   # Example hashed secret (add with: echo "YourSecret" | redact secret add --id my-secret)
   # - id: my-secret
   #   pattern: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

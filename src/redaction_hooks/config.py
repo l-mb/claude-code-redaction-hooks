@@ -23,6 +23,7 @@ from .models import Action, Rule, Target
 
 VALID_ACTIONS = {"block", "redact", "warn"}
 VALID_TARGETS = {"llm", "tool", "both"}
+VALID_FILE_TOOLS = {"read", "write", "rw"}
 
 PROJECT_RULES_FILE = ".redaction_rules"
 GLOBAL_RULES_DIR = Path.home() / ".claude"
@@ -35,6 +36,8 @@ def _parse_rule(data: dict[str, Any]) -> Rule:
         id=data["id"],
         pattern=data.get("pattern"),
         path_pattern=data.get("path_pattern"),
+        file_content_pattern=data.get("file_content_pattern"),
+        file_tools=data.get("file_tools"),
         is_regex=data.get("is_regex", True),
         hashed=data.get("hashed", False),
         hash_extractor=data.get("hash_extractor"),
@@ -68,6 +71,8 @@ def save_rules_file(path: Path, rules: list[Rule]) -> None:
                     "id": r.id,
                     "pattern": r.pattern,
                     "path_pattern": r.path_pattern,
+                    "file_content_pattern": r.file_content_pattern,
+                    "file_tools": r.file_tools,
                     "is_regex": r.is_regex if not r.is_regex else None,
                     "hashed": r.hashed if r.hashed else None,
                     "hash_extractor": r.hash_extractor,
@@ -166,9 +171,16 @@ def _validate_rule(rule: dict[str, Any], index: int, seen_ids: set[str]) -> list
 
     has_pattern = "pattern" in rule
     has_path_pattern = "path_pattern" in rule
+    has_file_content_pattern = "file_content_pattern" in rule
 
-    if not has_pattern and not has_path_pattern:
-        errors.append(f"{prefix}: must have 'pattern' or 'path_pattern'")
+    if not has_pattern and not has_path_pattern and not has_file_content_pattern:
+        errors.append(f"{prefix}: must have 'pattern', 'path_pattern', or 'file_content_pattern'")
+
+    if has_pattern and has_file_content_pattern:
+        errors.append(
+            f"{prefix}: 'pattern' and 'file_content_pattern' are mutually exclusive "
+            "(combining them would silently ignore 'pattern')"
+        )
 
     if has_pattern and rule.get("is_regex", True) and not rule.get("hashed", False):
         try:
@@ -178,6 +190,19 @@ def _validate_rule(rule: dict[str, Any], index: int, seen_ids: set[str]) -> list
 
     if has_path_pattern and not isinstance(rule["path_pattern"], str):
         errors.append(f"{prefix}: path_pattern must be a string")
+
+    if has_file_content_pattern:
+        if not isinstance(rule["file_content_pattern"], str):
+            errors.append(f"{prefix}: file_content_pattern must be a string")
+        else:
+            try:
+                re.compile(rule["file_content_pattern"])
+            except re.error as e:
+                errors.append(f"{prefix}: invalid file_content_pattern regex: {e}")
+
+    if "file_tools" in rule and rule["file_tools"] not in VALID_FILE_TOOLS:
+        valid = ", ".join(sorted(VALID_FILE_TOOLS))
+        errors.append(f"{prefix}: invalid file_tools '{rule['file_tools']}' (must be: {valid})")
 
     if "hash_extractor" in rule:
         try:

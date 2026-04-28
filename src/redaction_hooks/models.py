@@ -22,6 +22,9 @@ Target = Literal["llm", "tool", "both"]
 Replacement = Literal["str", "ip", "email", "hostname"] | str
 
 
+FileTools = Literal["read", "write", "rw"]
+
+
 @dataclass
 class Rule:
     """A redaction rule defining a pattern and action."""
@@ -29,6 +32,8 @@ class Rule:
     id: str
     pattern: str | None = None  # Content pattern (regex or fixed string)
     path_pattern: str | None = None  # File path pattern (glob via fnmatch)
+    file_content_pattern: str | None = None  # Pattern to match in file's first 100 lines
+    file_tools: FileTools | None = None  # Filter file_content rules: read, write, rw
     is_regex: bool = True
     hashed: bool = False
     hash_extractor: str | None = None
@@ -39,8 +44,14 @@ class Rule:
     description: str = ""
 
     def __post_init__(self) -> None:
-        if not self.pattern and not self.path_pattern:
-            raise ValueError(f"Rule '{self.id}': must have pattern or path_pattern")
+        if not self.pattern and not self.path_pattern and not self.file_content_pattern:
+            raise ValueError(
+                f"Rule '{self.id}': must have pattern, path_pattern, or file_content_pattern"
+            )
+        if self.pattern and self.file_content_pattern:
+            raise ValueError(
+                f"Rule '{self.id}': pattern and file_content_pattern are mutually exclusive"
+            )
 
 
 @dataclass

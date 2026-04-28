@@ -192,7 +192,22 @@ rules:
   - id: test
 """)
     errors = validate_rules_file(tmp_rules_file)
-    assert any("must have 'pattern' or 'path_pattern'" in e for e in errors)
+    expected = "must have 'pattern', 'path_pattern', or 'file_content_pattern'"
+    assert any(expected in e for e in errors)
+
+
+def test_validate_rejects_pattern_with_file_content_pattern(tmp_rules_file: Path) -> None:
+    """Test validation rejects rules combining 'pattern' and 'file_content_pattern'."""
+    from redaction_hooks.config import validate_rules_file
+
+    tmp_rules_file.write_text("""
+rules:
+  - id: combined
+    pattern: "AKIA[A-Z0-9]{16}"
+    file_content_pattern: "kind: Config"
+""")
+    errors = validate_rules_file(tmp_rules_file)
+    assert any("mutually exclusive" in e for e in errors)
 
 
 def test_validate_invalid_regex(tmp_rules_file: Path) -> None:
