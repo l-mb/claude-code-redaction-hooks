@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .actions import apply_actions
-from .audit import parse_duration, read_entries
+from .audit import parse_duration, prune_entries, read_entries
 from .config import (
     GLOBAL_RULES_DIR,
     add_hashed_rule,
@@ -234,6 +234,18 @@ def cmd_audit_since(args: argparse.Namespace) -> int:
     return _print_entries(entries)
 
 
+def cmd_audit_prune(args: argparse.Namespace) -> int:
+    """Delete audit entries older than the given duration (e.g. '30d')."""
+    try:
+        seconds = parse_duration(args.before)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    removed = prune_entries(seconds, _audit_project_dir(args.glob))
+    print(f"Removed {removed} entries older than {args.before}", file=sys.stderr)
+    return 0
+
+
 REDACT_HOOK_COMMAND = "redact hook"
 _HOOK_EVENT_MATCHERS: dict[str, str | None] = {
     "PreToolUse": "Write|Edit|Bash",
@@ -434,6 +446,16 @@ def main() -> int | NoReturn:
         "--global", dest="glob", action="store_true", help="Read the global audit log"
     )
 
+    audit_prune = audit_sub.add_parser(
+        "prune", help="Delete entries older than DURATION (e.g. 30d, 12w)"
+    )
+    audit_prune.add_argument(
+        "--before", required=True, help="Delete entries older than this (e.g. 30d, 12w)"
+    )
+    audit_prune.add_argument(
+        "--global", dest="glob", action="store_true", help="Prune the global audit log"
+    )
+
     args = parser.parse_args()
 
     if args.command == "hook":
@@ -456,6 +478,8 @@ def main() -> int | NoReturn:
             return cmd_audit_tail(args)
         if args.audit_command == "since":
             return cmd_audit_since(args)
+        if args.audit_command == "prune":
+            return cmd_audit_prune(args)
 
     parser.print_help()
     return 1

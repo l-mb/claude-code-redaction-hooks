@@ -48,6 +48,7 @@ redact check --rules FILE      # use custom rules file
 redact check -q                # quiet mode (only output blocked)
 redact audit tail [-n N]       # last N audit entries (default 20)
 redact audit since DURATION    # entries newer than e.g. 30m, 1h, 7d
+redact audit prune --before D  # delete entries older than DURATION (e.g. 30d)
 redact hook                    # run as Claude Code hook (reads JSON from stdin)
 ```
 

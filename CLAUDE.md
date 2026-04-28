@@ -34,6 +34,7 @@ redact claude-setup --dry-run    # Print resulting settings.json without writing
 redact claude-setup --uninstall  # Remove only the redact-hook entries
 redact audit tail [-n N]         # Print last N audit entries (default 20)
 redact audit since DURATION      # Print entries newer than e.g. 30m, 1h, 7d
+redact audit prune --before D    # Delete entries older than DURATION (e.g. 30d, 12w)
 ```
 
 Add `--global` to any command to use `~/.claude/.redaction_rules` instead of project.

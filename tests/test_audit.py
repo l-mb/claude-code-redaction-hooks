@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from redaction_hooks.audit import log_event, parse_duration, read_entries
+from redaction_hooks.audit import log_event, parse_duration, prune_entries, read_entries
 
 
 def test_log_event_appends_jsonl(tmp_path: Path) -> None:
@@ -110,6 +110,74 @@ def test_parse_duration_rejects_garbage(bad: str) -> None:
 
 def test_read_entries_empty_when_no_log(tmp_path: Path) -> None:
     assert read_entries(tmp_path) == []
+
+
+def _write_entries(path: Path, entries: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(e) + "\n" for e in entries))
+
+
+def test_prune_removes_only_old_entries(tmp_path: Path) -> None:
+    """Entries older than the cutoff are removed; recent ones survive."""
+    log_path = tmp_path / ".claude" / "redaction_audit.log"
+    now = datetime.now(UTC)
+    _write_entries(
+        log_path,
+        [
+            {"ts": (now - timedelta(days=40)).isoformat(), "rule_ids": ["old-1"]},
+            {"ts": (now - timedelta(days=10)).isoformat(), "rule_ids": ["old-2"]},
+            {"ts": (now - timedelta(days=1)).isoformat(), "rule_ids": ["recent"]},
+        ],
+    )
+
+    removed = prune_entries(7 * 86400, project_dir=tmp_path)
+
+    assert removed == 2
+    remaining = [e["rule_ids"] for e in read_entries(tmp_path)]
+    assert remaining == [["recent"]]
+
+
+def test_prune_no_op_when_log_missing(tmp_path: Path) -> None:
+    assert prune_entries(86400, project_dir=tmp_path) == 0
+
+
+def test_prune_no_op_when_no_entries_eligible(tmp_path: Path) -> None:
+    """If nothing is old enough, prune skips the rewrite entirely."""
+    log_event("PreToolUse", "block", ["fresh"], project_dir=tmp_path)
+    log_path = tmp_path / ".claude" / "redaction_audit.log"
+    inode_before = log_path.stat().st_ino
+
+    removed = prune_entries(86400, project_dir=tmp_path)
+
+    assert removed == 0
+    assert log_path.stat().st_ino == inode_before, "untouched log file should keep its inode"
+
+
+def test_prune_preserves_unparseable_lines(tmp_path: Path) -> None:
+    """Garbled or ts-less lines are kept (we can't safely age them out)."""
+    log_path = tmp_path / ".claude" / "redaction_audit.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    old_ts = (datetime.now(UTC) - timedelta(days=40)).isoformat()
+    log_path.write_text(
+        "this is not json\n"
+        + json.dumps({"hook": "Pre", "rule_ids": ["no-ts"]})
+        + "\n"
+        + json.dumps({"ts": old_ts, "hook": "Pre", "rule_ids": ["old"]})
+        + "\n"
+    )
+
+    removed = prune_entries(7 * 86400, project_dir=tmp_path)
+
+    assert removed == 1
+    lines = log_path.read_text().splitlines()
+    assert "this is not json" in lines
+    assert any("no-ts" in line for line in lines)
+    assert not any("old" in line for line in lines)
+
+
+def test_prune_rejects_negative_duration(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        prune_entries(-1, project_dir=tmp_path)
 
 
 def test_log_event_handles_old_iso_timestamps(tmp_path: Path) -> None:
