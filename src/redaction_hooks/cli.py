@@ -234,48 +234,126 @@ def cmd_audit_since(args: argparse.Namespace) -> int:
     return _print_entries(entries)
 
 
+REDACT_HOOK_COMMAND = "redact hook"
+_HOOK_EVENT_MATCHERS: dict[str, str | None] = {
+    "PreToolUse": "Write|Edit|Bash",
+    "PostToolUse": "Read|Bash|Grep|Glob|WebFetch",
+    "UserPromptSubmit": None,
+}
+
+
+def _entry_has_redact_hook(entry: dict[str, object]) -> bool:
+    hooks = entry.get("hooks")
+    if not isinstance(hooks, list):
+        return False
+    return any(isinstance(h, dict) and h.get("command") == REDACT_HOOK_COMMAND for h in hooks)
+
+
+def _install_redact_hooks(settings: dict[str, object]) -> tuple[list[str], list[str]]:
+    """Append redact-hook entries that aren't already present. Returns (added, skipped)."""
+    hooks_section = settings.setdefault("hooks", {})
+    if not isinstance(hooks_section, dict):
+        raise ValueError("settings.hooks must be an object")
+    added: list[str] = []
+    skipped: list[str] = []
+    for event, matcher in _HOOK_EVENT_MATCHERS.items():
+        existing = hooks_section.setdefault(event, [])
+        if not isinstance(existing, list):
+            raise ValueError(f"settings.hooks.{event} must be a list")
+        if any(_entry_has_redact_hook(e) for e in existing if isinstance(e, dict)):
+            skipped.append(event)
+            continue
+        new_entry: dict[str, object] = {
+            "hooks": [{"type": "command", "command": REDACT_HOOK_COMMAND}]
+        }
+        if matcher is not None:
+            new_entry["matcher"] = matcher
+        existing.append(new_entry)
+        added.append(event)
+    return added, skipped
+
+
+def _uninstall_redact_hooks(settings: dict[str, object]) -> list[str]:
+    """Remove only entries containing the redact-hook command. Returns events touched."""
+    hooks_section = settings.get("hooks")
+    if not isinstance(hooks_section, dict):
+        return []
+    changed: list[str] = []
+    for event in list(hooks_section):
+        entries = hooks_section[event]
+        if not isinstance(entries, list):
+            continue
+        new_entries: list[dict[str, object]] = []
+        modified = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                new_entries.append(entry)
+                continue
+            hooks = entry.get("hooks")
+            if not isinstance(hooks, list):
+                new_entries.append(entry)
+                continue
+            kept = [
+                h
+                for h in hooks
+                if not (isinstance(h, dict) and h.get("command") == REDACT_HOOK_COMMAND)
+            ]
+            if len(kept) == len(hooks):
+                new_entries.append(entry)
+                continue
+            modified = True
+            if kept:
+                new_entry = dict(entry)
+                new_entry["hooks"] = kept
+                new_entries.append(new_entry)
+        if modified:
+            changed.append(event)
+        if new_entries:
+            hooks_section[event] = new_entries
+        else:
+            del hooks_section[event]
+    return changed
+
+
 def cmd_claude_setup(args: argparse.Namespace) -> int:
-    """Configure Claude Code hooks in settings.json."""
-    if args.glob:
-        settings_path = GLOBAL_RULES_DIR / "settings.json"
-    else:
-        settings_path = Path.cwd() / ".claude" / "settings.json"
+    """Configure Claude Code hooks in settings.json (or remove with --uninstall)."""
+    settings_path = (
+        GLOBAL_RULES_DIR / "settings.json"
+        if args.glob
+        else Path.cwd() / ".claude" / "settings.json"
+    )
 
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Load existing settings
     if settings_path.exists():
         with settings_path.open() as f:
             settings = json.load(f)
+        if not isinstance(settings, dict):
+            print(f"Error: {settings_path} is not a JSON object", file=sys.stderr)
+            return 1
     else:
         settings = {}
 
-    # Add hooks configuration
-    hooks_config = {
-        "PreToolUse": [
-            {
-                "matcher": "Write|Edit|Bash",
-                "hooks": [{"type": "command", "command": "redact hook"}],
-            }
-        ],
-        "PostToolUse": [
-            {
-                "matcher": "Read|Bash|Grep|Glob|WebFetch",
-                "hooks": [{"type": "command", "command": "redact hook"}],
-            }
-        ],
-        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "redact hook"}]}],
-    }
+    if args.uninstall:
+        changed = _uninstall_redact_hooks(settings)
+        summary = (
+            f"removed redact-hook from {changed}" if changed else "no redact-hook entries found"
+        )
+    else:
+        added, skipped = _install_redact_hooks(settings)
+        parts = []
+        if added:
+            parts.append(f"added to {added}")
+        if skipped:
+            parts.append(f"already present in {skipped}")
+        summary = "; ".join(parts) if parts else "no changes"
 
-    if "hooks" not in settings:
-        settings["hooks"] = {}
+    payload = json.dumps(settings, indent=2)
+    if args.dry_run:
+        print(payload)
+        return 0
 
-    settings["hooks"].update(hooks_config)
-
-    with settings_path.open("w") as f:
-        json.dump(settings, f, indent=2)
-
-    print(f"Updated {settings_path}", file=sys.stderr)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(payload + "\n")
+    print(f"Updated {settings_path}: {summary}", file=sys.stderr)
     return 0
 
 
@@ -322,6 +400,17 @@ def main() -> int | NoReturn:
     setup_parser = subparsers.add_parser("claude-setup", help="Configure Claude Code hooks")
     setup_parser.add_argument(
         "--global", dest="glob", action="store_true", help="Configure global settings"
+    )
+    setup_parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Print the resulting settings.json without writing it",
+    )
+    setup_parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove only the redact-hook entries this tool added",
     )
 
     # audit subcommand group

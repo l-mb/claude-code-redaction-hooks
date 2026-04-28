@@ -192,7 +192,7 @@ def test_claude_setup(project_dir: Path) -> None:
 
 
 def test_claude_setup_merges_existing(project_dir: Path) -> None:
-    """Test claude-setup merges with existing settings."""
+    """Test claude-setup preserves unrelated top-level settings."""
     settings_dir = project_dir / ".claude"
     settings_dir.mkdir()
     settings_path = settings_dir / "settings.json"
@@ -205,6 +205,102 @@ def test_claude_setup_merges_existing(project_dir: Path) -> None:
         settings = json.load(f)
     assert settings["existing"] == "value"
     assert "hooks" in settings
+
+
+def test_claude_setup_preserves_other_tool_hook(project_dir: Path) -> None:
+    """claude-setup must NOT overwrite another tool's hook on the same event."""
+    settings_dir = project_dir / ".claude"
+    settings_dir.mkdir()
+    settings_path = settings_dir / "settings.json"
+    other_tool = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Edit",
+                    "hooks": [{"type": "command", "command": "ruff format"}],
+                }
+            ]
+        }
+    }
+    settings_path.write_text(json.dumps(other_tool))
+
+    code, out, err = run_cli("claude-setup")
+    assert code == 0
+
+    settings = json.loads(settings_path.read_text())
+    pre = settings["hooks"]["PreToolUse"]
+    commands = [h["command"] for entry in pre for h in entry["hooks"]]
+    assert "ruff format" in commands
+    assert "redact hook" in commands
+
+
+def test_claude_setup_is_idempotent(project_dir: Path) -> None:
+    """Running claude-setup twice must not duplicate the redact hook entry."""
+    run_cli("claude-setup")
+    run_cli("claude-setup")
+    settings = json.loads((project_dir / ".claude" / "settings.json").read_text())
+    pre = settings["hooks"]["PreToolUse"]
+    redact_count = sum(1 for entry in pre for h in entry["hooks"] if h["command"] == "redact hook")
+    assert redact_count == 1
+
+
+def test_claude_setup_dry_run_does_not_write(project_dir: Path) -> None:
+    """--dry-run prints the resulting settings.json but does not modify disk."""
+    code, out, err = run_cli("claude-setup", "--dry-run")
+    assert code == 0
+    settings_path = project_dir / ".claude" / "settings.json"
+    assert not settings_path.exists()
+    settings = json.loads(out)
+    assert "hooks" in settings
+
+
+def test_claude_setup_uninstall_removes_only_redact_hook(project_dir: Path) -> None:
+    """--uninstall removes only entries with `command == 'redact hook'`."""
+    settings_dir = project_dir / ".claude"
+    settings_dir.mkdir()
+    settings_path = settings_dir / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Write|Edit|Bash",
+                            "hooks": [
+                                {"type": "command", "command": "redact hook"},
+                                {"type": "command", "command": "another tool"},
+                            ],
+                        },
+                        {
+                            "matcher": "Edit",
+                            "hooks": [{"type": "command", "command": "ruff format"}],
+                        },
+                    ]
+                }
+            }
+        )
+    )
+
+    code, out, err = run_cli("claude-setup", "--uninstall")
+    assert code == 0
+    settings = json.loads(settings_path.read_text())
+    pre = settings["hooks"]["PreToolUse"]
+    commands = [h["command"] for entry in pre for h in entry["hooks"]]
+    assert "redact hook" not in commands
+    assert "another tool" in commands  # other commands in the same entry preserved
+    assert "ruff format" in commands  # other entries preserved
+
+
+def test_claude_setup_uninstall_when_nothing_present(project_dir: Path) -> None:
+    """--uninstall on a settings.json without redact hooks is a no-op exit 0."""
+    settings_dir = project_dir / ".claude"
+    settings_dir.mkdir()
+    settings_path = settings_dir / "settings.json"
+    settings_path.write_text('{"hooks": {}}')
+
+    code, out, err = run_cli("claude-setup", "--uninstall")
+    assert code == 0
+    assert "no redact-hook entries found" in err
 
 
 def test_hook_subcommand(project_dir: Path) -> None:
