@@ -16,6 +16,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from redaction_hooks.mappings import get_or_create_mapping, load_mappings, save_mappings
 
 
@@ -61,3 +63,62 @@ def test_separate_rules(tmp_path: Path) -> None:
     mappings = load_mappings(tmp_path)
     assert mappings["rule1"]["text"] == "replacement1"
     assert mappings["rule2"]["text"] == "replacement2"
+
+
+def _concurrency_worker(args: tuple[str, int]) -> str:
+    """Module-level worker for ProcessPoolExecutor.map (must be picklable)."""
+    project_dir, idx = args
+    return get_or_create_mapping("rule", "secret", lambda: f"replacement-{idx}", Path(project_dir))
+
+
+def test_concurrent_workers_agree_on_replacement(tmp_path: Path) -> None:
+    """N concurrent workers must all see the same replacement value.
+
+    Without locking, the load-modify-write race produces divergent replacements
+    and silently corrupts deterministic redaction across sessions.
+    """
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    n = 16
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=n, mp_context=ctx) as ex:
+        results = list(ex.map(_concurrency_worker, [(str(tmp_path), i) for i in range(n)]))
+
+    assert len(set(results)) == 1, f"got divergent replacements: {set(results)}"
+    persisted = load_mappings(tmp_path)
+    assert persisted["rule"]["secret"] == results[0]
+
+
+def test_load_quarantines_corrupt_file(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A corrupt mappings file is renamed aside, not silently erased."""
+    path = tmp_path / ".claude" / "redaction_mappings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{ this is not valid json")
+
+    mappings = load_mappings(tmp_path)
+    assert mappings == {}
+    assert not path.exists()
+    quarantines = list(path.parent.glob(f"{path.name}.corrupt-*"))
+    assert len(quarantines) == 1
+    assert "not valid json" in quarantines[0].read_text()
+    assert "corrupt mappings file" in capsys.readouterr().err
+
+
+def test_save_is_atomic_no_partial_file_on_error(tmp_path: Path) -> None:
+    """If json.dump raises, no partial mappings file is left behind."""
+    from contextlib import suppress
+    from unittest.mock import patch
+
+    path = tmp_path / ".claude" / "redaction_mappings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"mappings": {"rule": {"k": "v"}}}')
+    original = path.read_text()
+
+    with patch("json.dump", side_effect=RuntimeError("disk full")), suppress(RuntimeError):
+        save_mappings({"rule": {"new": "value"}}, tmp_path)
+
+    # Original file untouched; no leftover .tmp files
+    assert path.read_text() == original
+    leftovers = [p for p in path.parent.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
