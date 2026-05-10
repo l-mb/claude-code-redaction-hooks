@@ -27,6 +27,7 @@ hooks.py to recognise the new shape.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -47,23 +48,29 @@ def _load(name: str) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    ("fixture", "expected_paths", "expected_content_substr"),
+    ("fixture", "expected_path_regex", "expected_content_substr"),
     [
-        # Substrings reference the harness's `redact-verify` canary -- stable
-        # across re-runs of `redact verify-cc-schema --update-golden`.
-        ("PreToolUse-Bash.json", [], "<PROJECT>"),
-        ("PreToolUse-Read.json", ["<PROJECT>/multi.txt"], None),
-        ("PreToolUse-Grep.json", ["README.md"], "rules"),
-        ("PreToolUse-Agent.json", [], "list cwd files"),
-        ("PreToolUse-Edit.json", ["<PROJECT>/note.txt"], "redact-verify"),
-        ("PreToolUse-Write.json", ["<PROJECT>/out.txt"], "redact-verify"),
-        ("PreToolUse-Glob.json", [], "*.md"),
-        ("PreToolUse-ToolSearch.json", [], "select:"),
+        # `expected_path_regex` is matched against `paths[0]` after asserting
+        # exactly one path was extracted. None = path-extractor not asserted
+        # (the tool has no path input). Substrings reference the harness's
+        # `redact-verify` canary or stable seeded filenames -- the harness's
+        # `update_golden` overwrites fixtures with whichever capture happened
+        # most recently, so basenames vary between runs (note.txt vs multi.txt
+        # for Read, etc.); the regex tolerates this while still proving the
+        # extractor returned a path of the expected shape.
+        ("PreToolUse-Bash.json", None, "<PROJECT>"),
+        ("PreToolUse-Read.json", r"^<PROJECT>/[\w.-]+$", None),
+        ("PreToolUse-Grep.json", r"^README\.md$", "rules"),
+        ("PreToolUse-Agent.json", None, "list cwd files"),
+        ("PreToolUse-Edit.json", r"^<PROJECT>/[\w.-]+$", "redact-verify"),
+        ("PreToolUse-Write.json", r"^<PROJECT>/[\w.-]+$", "redact-verify"),
+        ("PreToolUse-Glob.json", None, "*.md"),
+        ("PreToolUse-ToolSearch.json", None, "select:"),
     ],
 )
 def test_pre_tool_use_extractor_recognises_payload(
     fixture: str,
-    expected_paths: list[str],
+    expected_path_regex: str | None,
     expected_content_substr: str | None,
 ) -> None:
     """PreToolUse extractor returns non-empty content for every known shape.
@@ -81,9 +88,14 @@ def test_pre_tool_use_extractor_recognises_payload(
     paths = _get_tool_input_paths(tool_name, tool_input)
     content = _get_tool_input_content(tool_name, tool_input)
 
-    if expected_paths:
-        assert paths == expected_paths, (
-            f"path extractor returned {paths!r} for {fixture}; tool_input path key may have moved"
+    if expected_path_regex is not None:
+        assert len(paths) == 1, (
+            f"expected exactly one path for {fixture}, got {paths!r}; "
+            "tool_input path key may have moved or been duplicated"
+        )
+        assert re.match(expected_path_regex, paths[0]), (
+            f"path {paths[0]!r} does not match {expected_path_regex!r} for {fixture}; "
+            "extracted path shape may have changed"
         )
     if expected_content_substr is not None:
         assert content is not None and expected_content_substr in content, (
