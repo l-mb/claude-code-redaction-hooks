@@ -82,11 +82,12 @@ def _check_single_file(file_path: Path, matcher: PatternMatcher, quiet: bool) ->
 def cmd_hook(args: argparse.Namespace) -> int:
     """Run as Claude Code hook.
 
-    Uses `$CLAUDE_PROJECT_DIR` (set by Claude Code in the hook subprocess
-    environment) when present so rules and the audit log are anchored to the
-    project root rather than the hook process's cwd.
+    Resolves the project directory from `$CLAUDE_PROJECT_DIR` when CC sets it.
+    When the env var is unset (e.g. ad-hoc `redact hook` invocations from a
+    shell), falls back to `Path.cwd()` so rules / mappings / audit log all
+    land in the same place that `redact audit tail` reads from. An invalid
+    `CLAUDE_PROJECT_DIR` value also degrades to cwd with a stderr warning.
     """
-    project_dir: Path | None = None
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if env_dir:
         candidate = Path(env_dir).expanduser()
@@ -97,6 +98,9 @@ def cmd_hook(args: argparse.Namespace) -> int:
                 f"redaction_hooks: CLAUDE_PROJECT_DIR={env_dir!r} is not a directory; "
                 "falling back to cwd\n"
             )
+            project_dir = Path.cwd()
+    else:
+        project_dir = Path.cwd()
     return run_hook(project_dir)
 
 

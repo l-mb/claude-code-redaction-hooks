@@ -434,10 +434,45 @@ def test_hook_subcommand_warns_on_invalid_claude_project_dir(
     """An invalid `$CLAUDE_PROJECT_DIR` is reported and we fall back to cwd."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "does-not-exist"))
-    data = {"hook_event_name": "UnknownEvent"}
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "AKIAIOSFODNN7EXAMPLE", "file_path": "x.py"},
+    }
     code, out, err = run_cli("hook", stdin_text=json.dumps(data))
-    assert code == 0
+    assert code == 2  # cwd's rules are loaded after the fallback
     assert "is not a directory" in err
+    audit = tmp_path / ".claude" / "redaction_audit.log"
+    assert audit.exists(), "audit log should land in cwd after invalid env fallback"
+
+
+def test_hook_subcommand_defaults_to_cwd_when_env_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `CLAUDE_PROJECT_DIR` unset, the hook anchors to cwd (not global)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "AKIAIOSFODNN7EXAMPLE", "file_path": "x.py"},
+    }
+    code, _, _ = run_cli("hook", stdin_text=json.dumps(data))
+    assert code == 2
+    audit = tmp_path / ".claude" / "redaction_audit.log"
+    assert audit.exists(), "audit log must land in cwd, not the user-global path"
 
 
 def test_hook_subcommand(project_dir: Path) -> None:
