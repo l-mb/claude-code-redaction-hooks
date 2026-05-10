@@ -119,6 +119,13 @@ rules:
     action: block
 ```
 
+> **Note on hand-edited rules.** `redact secret add` (and any other CLI
+> write path) re-serialises the rules file with `yaml.dump`, which **drops
+> comments and may reflow quoting**. If you maintain `.redaction_rules` by
+> hand with comments or anchors, edit it directly with `redact edit` and
+> avoid mixing `secret add` into the same file — or restore your curated
+> copy from version control afterwards.
+
 ### Rule fields
 
 - `id`: rule identifier (required)
