@@ -234,6 +234,34 @@ def test_claude_setup_preserves_other_tool_hook(project_dir: Path) -> None:
     assert "redact hook" in commands
 
 
+def test_claude_setup_installs_without_matcher(project_dir: Path) -> None:
+    """Installed redact-hook entries must omit `matcher` so they fire for every tool.
+
+    Earlier versions used `matcher: "Write|Edit|Bash"` on PreToolUse and
+    `Read|Bash|Grep|Glob|WebFetch` on PostToolUse, silently bypassing
+    `tool: Read`, MultiEdit, WebSearch, Task/Agent, and MCP `mcp__*__*` tools.
+    """
+    code, out, err = run_cli("claude-setup")
+    assert code == 0
+    settings = json.loads((project_dir / ".claude" / "settings.json").read_text())
+    for event in (
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "InstructionsLoaded",
+        "PostCompact",
+        "Stop",
+        "SubagentStop",
+    ):
+        entries = settings["hooks"][event]
+        redact = [
+            e for e in entries if any(h.get("command") == "redact hook" for h in e.get("hooks", []))
+        ]
+        assert redact, f"no redact entry on {event}"
+        for entry in redact:
+            assert "matcher" not in entry, f"{event} entry should omit matcher: {entry}"
+
+
 def test_claude_setup_is_idempotent(project_dir: Path) -> None:
     """Running claude-setup twice must not duplicate the redact hook entry."""
     run_cli("claude-setup")
@@ -301,6 +329,46 @@ def test_claude_setup_uninstall_when_nothing_present(project_dir: Path) -> None:
     code, out, err = run_cli("claude-setup", "--uninstall")
     assert code == 0
     assert "no redact-hook entries found" in err
+
+
+def test_hook_subcommand_honours_claude_project_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`$CLAUDE_PROJECT_DIR` overrides cwd so rules/audit anchor to the project root."""
+    real_project = tmp_path / "real-project"
+    real_project.mkdir()
+    (real_project / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(real_project))
+
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "AKIAIOSFODNN7EXAMPLE", "file_path": "x.py"},
+    }
+    code, out, err = run_cli("hook", stdin_text=json.dumps(data))
+    assert code == 2  # rule fired despite cwd containing no rules
+    audit = real_project / ".claude" / "redaction_audit.log"
+    assert audit.exists(), "audit log should land in CLAUDE_PROJECT_DIR"
+
+
+def test_hook_subcommand_warns_on_invalid_claude_project_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An invalid `$CLAUDE_PROJECT_DIR` is reported and we fall back to cwd."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "does-not-exist"))
+    data = {"hook_event_name": "UnknownEvent"}
+    code, out, err = run_cli("hook", stdin_text=json.dumps(data))
+    assert code == 0
+    assert "is not a directory" in err
 
 
 def test_hook_subcommand(project_dir: Path) -> None:

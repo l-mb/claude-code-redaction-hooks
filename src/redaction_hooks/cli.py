@@ -80,8 +80,24 @@ def _check_single_file(file_path: Path, matcher: PatternMatcher, quiet: bool) ->
 
 
 def cmd_hook(args: argparse.Namespace) -> int:
-    """Run as Claude Code hook."""
-    return run_hook()
+    """Run as Claude Code hook.
+
+    Uses `$CLAUDE_PROJECT_DIR` (set by Claude Code in the hook subprocess
+    environment) when present so rules and the audit log are anchored to the
+    project root rather than the hook process's cwd.
+    """
+    project_dir: Path | None = None
+    env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env_dir:
+        candidate = Path(env_dir).expanduser()
+        if candidate.is_dir():
+            project_dir = candidate
+        else:
+            sys.stderr.write(
+                f"redaction_hooks: CLAUDE_PROJECT_DIR={env_dir!r} is not a directory; "
+                "falling back to cwd\n"
+            )
+    return run_hook(project_dir)
 
 
 def cmd_secret_add(args: argparse.Namespace) -> int:
@@ -247,11 +263,20 @@ def cmd_audit_prune(args: argparse.Namespace) -> int:
 
 
 REDACT_HOOK_COMMAND = "redact hook"
+# All entries fire for every tool (no `matcher`). The previous explicit lists
+# missed Read, MultiEdit, WebSearch, Task/Agent, and MCP `mcp__*__*` tools,
+# which silently bypassed `tool: Read`, `file_tools: read`, and similar rules.
+# Per-rule `tool:` filters still scope individual rules.
 _HOOK_EVENT_MATCHERS: dict[str, str | None] = {
-    "PreToolUse": "Write|Edit|Bash",
-    "PostToolUse": "Read|Bash|Grep|Glob|WebFetch",
+    "PreToolUse": None,
+    "PostToolUse": None,
+    "PostToolUseFailure": None,
     "UserPromptSubmit": None,
     "PreCompact": None,  # both manual /compact and auto compaction
+    "PostCompact": None,
+    "InstructionsLoaded": None,
+    "Stop": None,
+    "SubagentStop": None,
 }
 
 

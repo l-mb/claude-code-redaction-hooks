@@ -97,6 +97,10 @@ def test_pre_tool_use_redacts_email(rules_dir: Path) -> None:
     updated = output["hookSpecificOutput"]["updatedInput"]["content"]
     assert "alice@secret.com" not in updated
     assert "@example.com" in updated
+    # The model should be told a redaction occurred (rule IDs only, no secret text).
+    add_ctx = output["hookSpecificOutput"]["additionalContext"]
+    assert "email" in add_ctx
+    assert "alice@secret.com" not in add_ctx
 
 
 def test_pre_tool_use_allows_clean_content(rules_dir: Path) -> None:
@@ -182,7 +186,7 @@ def test_no_rules_allows_all(tmp_path: Path) -> None:
 
 
 def test_user_prompt_redact_warns(tmp_path: Path) -> None:
-    """Test that redact rules on prompts warn but allow."""
+    """Test that redact rules on prompts warn but allow, and surface additionalContext."""
     (tmp_path / ".redaction_rules").write_text("""
 rules:
   - id: email-redact
@@ -200,6 +204,9 @@ rules:
         code, output = capture_output(handle_user_prompt_submit, data, tmp_path)
     assert code == 0
     assert output["continue"] is True
+    add_ctx = output["hookSpecificOutput"]["additionalContext"]
+    assert "email-redact" in add_ctx
+    assert "alice@test.com" not in add_ctx
     assert "Warning" in stderr.getvalue()
     assert "email-redact" in stderr.getvalue()
 
@@ -433,6 +440,268 @@ rules:
     assert code == 0
     assert output == {"continue": True}
     assert "cannot redact non-dict" in stderr.getvalue()
+
+
+def test_post_tool_use_blocks_spilled_output_file(tmp_path: Path) -> None:
+    """A spill stub ({file_path, preview, ...}) is scanned by reading the file."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    spill = tmp_path / "spilled.txt"
+    spill.write_text("user data\nAKIAIOSFODNN7EXAMPLE\nmore data\n")
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_response": {
+            "file_path": str(spill),
+            "preview": "user data\n... (output truncated)",
+            "byte_size": spill.stat().st_size,
+            "truncated": True,
+        },
+    }
+    code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 2
+    assert output["decision"] == "block"
+    assert "aws-key" in output["reason"]
+
+
+def test_post_tool_use_warns_redact_match_in_spilled(tmp_path: Path) -> None:
+    """Redact rules in spilled-output content emit a redact-skipped audit entry."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    spill = tmp_path / "spilled.txt"
+    spill.write_text("contact alice@secret.com please\n")
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: email-redact
+    pattern: '[a-z]+@secret\\.com'
+    action: redact
+    replacement: email
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_response": {
+            "file_path": str(spill),
+            "preview": "contact alice@secret.com please",
+            "truncated": True,
+        },
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+    assert "non-redactable" in stderr.getvalue()
+    skipped = [
+        e
+        for e in read_entries(tmp_path)
+        if e["hook"] == "PostToolUse" and e["action"] == "redact-skipped"
+    ]
+    assert skipped
+    assert "email-redact" in skipped[0]["rule_ids"]
+
+
+def test_post_tool_use_unreadable_spilled_file_warns(tmp_path: Path) -> None:
+    """A spill stub pointing at a missing file emits stderr and allows."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_response": {
+            "file_path": str(tmp_path / "nonexistent.txt"),
+            "preview": "",
+            "truncated": True,
+        },
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 0
+    assert "cannot read spilled output" in stderr.getvalue()
+
+
+def test_post_tool_use_recursive_fallback_blocks_unknown_shape(tmp_path: Path) -> None:
+    """Unknown dict shapes fall back to a recursive walk so secrets still match."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "mcp__custom__weird_tool",
+        "tool_response": {
+            "data": {"nested": {"value": "leaked AKIAIOSFODNN7EXAMPLE here"}},
+        },
+    }
+    code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 2
+    assert output["decision"] == "block"
+
+
+def test_post_tool_use_known_shape_skips_recursive_walk(tmp_path: Path) -> None:
+    """A recognised tool_response shape must not trigger the recursive fallback."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    # Bash has known fields stdout/stderr/output. A secret in `extra` (not a known
+    # field) should NOT match because we recognised stdout and skipped the walk.
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_response": {
+            "stdout": "ok\n",
+            "extra": "AKIAIOSFODNN7EXAMPLE",  # would only match via recursive walk
+        },
+    }
+    code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+
+
+def test_post_tool_use_spill_indicator_alone_required(tmp_path: Path) -> None:
+    """`file_path` without any spill indicator is not treated as a spill stub."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    spill = tmp_path / "secret.txt"
+    spill.write_text("AKIAIOSFODNN7EXAMPLE\n")
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    # Read tool result: file_path is just a regular field, NOT a spill marker
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_response": {"file_path": str(spill), "content": "(empty)"},
+    }
+    code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    # `content` field gets scanned; "(empty)" doesn't match. No spill scan.
+    assert code == 0
+
+
+def test_post_tool_use_failure_audits_error_match(tmp_path: Path) -> None:
+    """A secret echoed back in `tool_error` is audited (warn-only -- exit 0)."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_post_tool_use_failure
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUseFailure",
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_failed_1",
+        "tool_input": {"command": "aws s3 ls"},
+        "tool_error": "InvalidAccessKey: AKIAIOSFODNN7EXAMPLE is not valid",
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_post_tool_use_failure, data, tmp_path)
+    assert code == 0  # warn-only, never blocks
+    assert output == {"continue": True}
+    assert "aws-key" in stderr.getvalue()
+    audits = [e for e in read_entries(tmp_path) if e["hook"] == "PostToolUseFailure"]
+    assert audits
+    assert audits[0]["tool_use_id"] == "toolu_failed_1"
+    assert "aws-key" in audits[0]["rule_ids"]
+
+
+def test_post_tool_use_failure_scans_input_too(tmp_path: Path) -> None:
+    """Failed-tool input is scanned in case PreToolUse missed it."""
+    from redaction_hooks.hooks import handle_post_tool_use_failure
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUseFailure",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo AKIAIOSFODNN7EXAMPLE && false"},
+        "tool_error": "exit code 1",
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, _ = capture_output(handle_post_tool_use_failure, data, tmp_path)
+    assert code == 0
+    assert "aws-key" in stderr.getvalue()
+
+
+def test_post_tool_use_failure_clean_is_no_op(tmp_path: Path) -> None:
+    """No matches => no audit entry, exit 0."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_post_tool_use_failure
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PostToolUseFailure",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls /nonexistent"},
+        "tool_error": "No such file or directory",
+    }
+    code, output = capture_output(handle_post_tool_use_failure, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+    assert read_entries(tmp_path) == []
+
+
+def test_run_hook_dispatches_post_tool_use_failure(tmp_path: Path) -> None:
+    """run_hook routes PostToolUseFailure events."""
+    (tmp_path / ".redaction_rules").write_text("rules:\n  - id: x\n    pattern: x")
+    data = {
+        "hook_event_name": "PostToolUseFailure",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+        "tool_error": "ok",
+    }
+    stdin = io.StringIO(json.dumps(data))
+    stdout = io.StringIO()
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+        code = run_hook(tmp_path)
+    assert code == 0
 
 
 def test_run_hook_dispatches_post_tool_use(rules_dir: Path) -> None:
@@ -704,6 +973,23 @@ def test_audit_logged_on_post_tool_use_redact(rules_dir: Path) -> None:
     redacts = [e for e in entries if e["action"] == "redact" and e["hook"] == "PostToolUse"]
     assert redacts
     assert "email" in redacts[0]["rule_ids"]
+
+
+def test_audit_includes_tool_use_id_when_present(rules_dir: Path) -> None:
+    """If the hook input includes `tool_use_id`, it must reach the audit entry."""
+    from redaction_hooks.audit import read_entries
+
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_use_id": "toolu_xyz123",
+        "tool_input": {"content": "AKIAIOSFODNN7EXAMPLE", "file_path": "x.py"},
+    }
+    capture_output(handle_pre_tool_use, data, rules_dir)
+    entries = read_entries(rules_dir)
+    blocks = [e for e in entries if e["action"] == "block"]
+    assert blocks
+    assert blocks[-1]["tool_use_id"] == "toolu_xyz123"
 
 
 def test_audit_not_written_when_no_match(rules_dir: Path) -> None:
@@ -1170,6 +1456,379 @@ rules:
 """)
     data = {"hook_event_name": "PreCompact", "trigger": "manual"}
     code, output = capture_output(handle_pre_compact, data, tmp_path)
+    assert code == 0
+
+
+def test_instructions_loaded_audits_secret_in_claude_md(tmp_path: Path) -> None:
+    """Loading a CLAUDE.md with a known secret pattern audits + warns."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_instructions_loaded
+
+    instr = tmp_path / "CLAUDE.md"
+    instr.write_text("Important: AWS key is AKIAIOSFODNN7EXAMPLE -- do not commit\n")
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "InstructionsLoaded",
+        "file_path": str(instr),
+        "memory_type": "Project",
+        "load_reason": "session_start",
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_instructions_loaded, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+    err = stderr.getvalue()
+    assert "aws-key" in err
+    assert "Project" in err
+    assert "session_start" in err
+    audits = [e for e in read_entries(tmp_path) if e["hook"] == "InstructionsLoaded"]
+    assert audits
+    assert audits[0]["action"] == "block"
+
+
+def test_instructions_loaded_clean_no_audit(tmp_path: Path) -> None:
+    """Clean instruction file produces no audit entry."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_instructions_loaded
+
+    instr = tmp_path / "CLAUDE.md"
+    instr.write_text("Normal project guidance with no secrets.\n")
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "InstructionsLoaded",
+        "file_path": str(instr),
+        "memory_type": "Project",
+        "load_reason": "session_start",
+    }
+    code, output = capture_output(handle_instructions_loaded, data, tmp_path)
+    assert code == 0
+    assert read_entries(tmp_path) == []
+
+
+def test_instructions_loaded_skips_target_tool_only_rules(tmp_path: Path) -> None:
+    """Rules with target=tool do not apply to InstructionsLoaded (LLM-side)."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_instructions_loaded
+
+    instr = tmp_path / "CLAUDE.md"
+    instr.write_text("AKIAIOSFODNN7EXAMPLE\n")
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-tool-only
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    data = {
+        "hook_event_name": "InstructionsLoaded",
+        "file_path": str(instr),
+        "memory_type": "User",
+        "load_reason": "session_start",
+    }
+    code, _ = capture_output(handle_instructions_loaded, data, tmp_path)
+    assert code == 0
+    assert read_entries(tmp_path) == []
+
+
+def test_instructions_loaded_unreadable_file_is_no_op(tmp_path: Path) -> None:
+    """A missing instruction file emits stderr and returns continue:true."""
+    from redaction_hooks.hooks import handle_instructions_loaded
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "InstructionsLoaded",
+        "file_path": str(tmp_path / "missing.md"),
+        "memory_type": "Project",
+        "load_reason": "include",
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_instructions_loaded, data, tmp_path)
+    assert code == 0
+    assert "cannot read" in stderr.getvalue()
+
+
+def test_run_hook_dispatches_instructions_loaded(tmp_path: Path) -> None:
+    """run_hook routes InstructionsLoaded events."""
+    instr = tmp_path / "CLAUDE.md"
+    instr.write_text("clean")
+    (tmp_path / ".redaction_rules").write_text("rules:\n  - id: x\n    pattern: x")
+    data = {
+        "hook_event_name": "InstructionsLoaded",
+        "file_path": str(instr),
+        "memory_type": "Project",
+        "load_reason": "session_start",
+    }
+    stdin = io.StringIO(json.dumps(data))
+    stdout = io.StringIO()
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+        code = run_hook(tmp_path)
+    assert code == 0
+
+
+def test_stop_warns_on_secret_in_last_assistant_message(tmp_path: Path) -> None:
+    """Stop scans the LAST assistant turn and warns if a rule matches."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_stop
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(
+        transcript,
+        {"type": "user", "content": "hi"},
+        {"type": "assistant", "content": "earlier reply"},
+        {"type": "user", "content": "tell me a key"},
+        {"type": "assistant", "content": "here: AKIAIOSFODNN7EXAMPLE"},
+    )
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "Stop",
+        "transcript_path": str(transcript),
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_stop, data, tmp_path)
+    assert code == 0  # warn-only, never blocks
+    assert output == {"continue": True}
+    assert "aws-key" in stderr.getvalue()
+    audits = [e for e in read_entries(tmp_path) if e["hook"] == "Stop"]
+    assert audits
+
+
+def test_stop_does_not_match_earlier_turns(tmp_path: Path) -> None:
+    """A secret in an earlier assistant turn must NOT trigger Stop -- only the latest."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_stop
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(
+        transcript,
+        {"type": "assistant", "content": "old leak: AKIAIOSFODNN7EXAMPLE"},
+        {"type": "user", "content": "ok"},
+        {"type": "assistant", "content": "all clean now"},
+    )
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {"hook_event_name": "Stop", "transcript_path": str(transcript)}
+    code, _ = capture_output(handle_stop, data, tmp_path)
+    assert code == 0
+    assert read_entries(tmp_path) == []
+
+
+def test_subagent_stop_uses_subagentstop_hook_label(tmp_path: Path) -> None:
+    """Audit entries written from SubagentStop must carry the SubagentStop hook tag."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_stop
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, {"type": "assistant", "content": "leak: AKIAIOSFODNN7EXAMPLE"})
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {"hook_event_name": "SubagentStop", "transcript_path": str(transcript)}
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        capture_output(handle_stop, data, tmp_path)
+    audits = read_entries(tmp_path)
+    assert audits and audits[0]["hook"] == "SubagentStop"
+
+
+def test_stop_handles_role_field(tmp_path: Path) -> None:
+    """Transcript turns using `role` instead of `type` are also recognised."""
+    from redaction_hooks.hooks import handle_stop
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(
+        transcript,
+        {"role": "assistant", "content": "key: AKIAIOSFODNN7EXAMPLE"},
+    )
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {"hook_event_name": "Stop", "transcript_path": str(transcript)}
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, _ = capture_output(handle_stop, data, tmp_path)
+    assert code == 0
+    assert "aws-key" in stderr.getvalue()
+
+
+def test_stop_handles_nested_message_role(tmp_path: Path) -> None:
+    """Transcript turns where role is nested under `message.role` are recognised."""
+    from redaction_hooks.hooks import handle_stop
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(
+        transcript,
+        {"message": {"role": "assistant", "content": "key: AKIAIOSFODNN7EXAMPLE"}},
+    )
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {"hook_event_name": "Stop", "transcript_path": str(transcript)}
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, _ = capture_output(handle_stop, data, tmp_path)
+    assert code == 0
+    assert "aws-key" in stderr.getvalue()
+
+
+def test_stop_no_assistant_message_is_no_op(tmp_path: Path) -> None:
+    """Transcript with no assistant turns is a clean no-op."""
+    from redaction_hooks.hooks import handle_stop
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, {"type": "user", "content": "AKIAIOSFODNN7EXAMPLE"})
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {"hook_event_name": "Stop", "transcript_path": str(transcript)}
+    code, output = capture_output(handle_stop, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+
+
+def test_stop_unreadable_transcript_warns(tmp_path: Path) -> None:
+    """A missing transcript_path emits stderr and returns continue:true."""
+    from redaction_hooks.hooks import handle_stop
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "Stop",
+        "transcript_path": str(tmp_path / "missing.jsonl"),
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, _ = capture_output(handle_stop, data, tmp_path)
+    assert code == 0
+    assert "cannot read transcript" in stderr.getvalue()
+
+
+def test_run_hook_dispatches_stop(tmp_path: Path) -> None:
+    """run_hook routes Stop events."""
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, {"type": "assistant", "content": "ok"})
+    (tmp_path / ".redaction_rules").write_text("rules:\n  - id: x\n    pattern: x")
+    data = {"hook_event_name": "Stop", "transcript_path": str(transcript)}
+    stdin = io.StringIO(json.dumps(data))
+    stdout = io.StringIO()
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+        code = run_hook(tmp_path)
+    assert code == 0
+
+
+def test_post_compact_audits_secret_in_compacted_transcript(tmp_path: Path) -> None:
+    """PostCompact warns + audits when the post-compaction transcript still leaks."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_post_compact
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(
+        transcript,
+        {"type": "user", "content": "summary follows"},
+        {"type": "assistant", "content": "Compaction summary: AKIAIOSFODNN7EXAMPLE was used"},
+    )
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PostCompact",
+        "transcript_path": str(transcript),
+        "trigger": "auto",
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_post_compact, data, tmp_path)
+    assert code == 0  # PostCompact is warn-only
+    assert output == {"continue": True}
+    err = stderr.getvalue()
+    assert "aws-key" in err
+    assert "trigger=auto" in err
+    audits = [e for e in read_entries(tmp_path) if e["hook"] == "PostCompact"]
+    assert audits
+
+
+def test_post_compact_clean_no_op(tmp_path: Path) -> None:
+    """A clean compacted transcript writes no audit entry."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_post_compact
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, {"type": "assistant", "content": "ok"})
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PostCompact",
+        "transcript_path": str(transcript),
+        "trigger": "manual",
+    }
+    code, _ = capture_output(handle_post_compact, data, tmp_path)
+    assert code == 0
+    assert read_entries(tmp_path) == []
+
+
+def test_run_hook_dispatches_post_compact(tmp_path: Path) -> None:
+    """run_hook routes PostCompact events."""
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, {"type": "assistant", "content": "ok"})
+    (tmp_path / ".redaction_rules").write_text("rules:\n  - id: x\n    pattern: x")
+    data = {
+        "hook_event_name": "PostCompact",
+        "transcript_path": str(transcript),
+        "trigger": "auto",
+    }
+    stdin = io.StringIO(json.dumps(data))
+    stdout = io.StringIO()
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+        code = run_hook(tmp_path)
     assert code == 0
 
 

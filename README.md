@@ -1,19 +1,31 @@
 # Claude Code Redaction Hooks
 
-Hooks for Claude Code to block or redact secrets/PII before LLM submission or tool execution, redact tool output before it returns, and warn on matches in transcripts about to be compacted.
+Hooks for Claude Code to block or redact secrets/PII before LLM submission or tool execution, redact tool output before it returns, and warn on matches in transcripts (compaction, stop, subagent stop), failed tool calls, and loaded memory files.
 
 Redaction is consistent (tracked via a mapping file). Reversing is not currently possible, see `Limitations`.
 
 ## Limitations
 
-Due to limitations in Claude Code's hook mechanism:
+What each hook event can do is determined by Claude Code:
 
-| Hook              | block | redact                       |
-|-------------------|-------|------------------------------|
-| PreToolUse        | Y     | Y (tool input modified)      |
-| PostToolUse       | Y     | Y (tool output modified)     |
-| UserPromptSubmit  | Y     | N — warns only               |
-| PreCompact        | Y     | N — warns only (no rewrite)  |
+- **block** — refuse the action: PreToolUse stops the tool from running; PostToolUse hides the result from the model; UserPromptSubmit drops the prompt; PreCompact aborts the compaction. Always paired with a `block` audit entry.
+- **redact** — rewrite the payload in place: PreToolUse swaps secrets in the tool input before it executes; PostToolUse swaps secrets in `tool_response` before the model sees it. The mapping file makes the same secret get the same replacement across calls.
+- **observe** — scan and audit only. The hook cannot stop or rewrite anything because Claude Code provides no decision channel for that event; matches are written to the audit log and stderr so an operator can react after the fact. Rules with `action: redact` on observe-only events surface as `redact-skipped` in the audit and a stderr warning.
+
+| Hook                | block | redact                          | observe |
+|---------------------|-------|---------------------------------|---------|
+| PreToolUse          | Y     | Y (tool input rewritten)        | Y       |
+| PostToolUse         | Y     | Y (tool output rewritten)       | Y       |
+| PostToolUseFailure  | N     | N                               | Y       |
+| UserPromptSubmit    | Y     | N — warns + `additionalContext` | Y       |
+| PreCompact          | Y     | N — warns only (no rewrite)     | Y       |
+| PostCompact         | N     | N                               | Y       |
+| InstructionsLoaded  | N     | N                               | Y       |
+| Stop / SubagentStop | (N)   | N                               | Y       |
+
+Stop/SubagentStop *can* return `decision:"block"`, but doing so just forces Claude to keep talking; it does not unsend the message that already leaked. We treat them as observe-only.
+
+Tool output that Claude Code spills to disk (>50K chars) is scanned via the `file_path` referenced in the spill stub. Matches against `block` rules still block; `redact` matches surface as a `redact-skipped` audit entry — the spill file is not rewritten because there's no contract that Claude Code re-reads it after the hook returns.
 
 No reversible redaction (un-redacting responses not implemented).
 
@@ -130,3 +142,12 @@ A regex configured via `hash_extractor` extracts candidate segments from input, 
 ```bash
 echo "SecretProjectName" | redact secret add --id project-name
 ```
+
+## 0.2.0 release notes
+
+- **Behaviour fix**: PreToolUse and PostToolUse hooks no longer ship with a hard-coded tool matcher. Earlier versions installed `matcher: "Write|Edit|Bash"` (PreToolUse) and `matcher: "Read|Bash|Grep|Glob|WebFetch"` (PostToolUse), which silently bypassed `Read`, `MultiEdit`, `WebSearch`, `Task`/Agent, and MCP `mcp__*__*` tools. Rules with `tool: Read` or `file_tools: read` now fire as the README has always documented. Re-run `redact claude-setup` (or `--uninstall && claude-setup`) to refresh existing installs.
+- **New hook events**: `PostToolUseFailure`, `PostCompact`, `Stop`, `SubagentStop`, and `InstructionsLoaded` are scanned (warn-only — see Limitations). They detect leaks in failed-tool errors, post-compaction summaries, the last assistant message, and loaded `CLAUDE.md` / `.claude/rules/*.md` files.
+- **Spilled tool output**: when Claude Code persists a tool result >50K chars to disk, the redaction hook now reads the spill file and applies block rules; redact rules surface a `redact-skipped` audit entry rather than silently passing.
+- **`additionalContext`** is now sent on `PreToolUse` redacts and `UserPromptSubmit` redacts so the model knows a rule fired (rule IDs only, never matched text).
+- **`tool_use_id`** is recorded in audit entries for pre/post correlation.
+- **`$CLAUDE_PROJECT_DIR`** is honoured by `redact hook` when set, anchoring rules and audit log to the project root regardless of the hook process's cwd.

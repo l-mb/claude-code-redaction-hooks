@@ -35,12 +35,20 @@ def _audit(
     matches: list[Match],
     *,
     tool: str | None = None,
+    tool_use_id: str | None = None,
     project_dir: Path | None = None,
 ) -> None:
     """Audit-log helper: extract rule IDs from matches and append a single entry."""
     rule_ids = sorted({m.rule.id for m in matches})
     if rule_ids:
-        log_event(hook=hook, action=action, rule_ids=rule_ids, tool=tool, project_dir=project_dir)
+        log_event(
+            hook=hook,
+            action=action,
+            rule_ids=rule_ids,
+            tool=tool,
+            tool_use_id=tool_use_id,
+            project_dir=project_dir,
+        )
 
 
 def _audit_timeouts(
@@ -48,6 +56,7 @@ def _audit_timeouts(
     rule_ids: list[str],
     *,
     tool: str | None = None,
+    tool_use_id: str | None = None,
     project_dir: Path | None = None,
 ) -> None:
     """Audit any rules whose regex exceeded the timeout."""
@@ -57,6 +66,7 @@ def _audit_timeouts(
             action="regex_timeout",
             rule_ids=sorted(set(rule_ids)),
             tool=tool,
+            tool_use_id=tool_use_id,
             project_dir=project_dir,
         )
 
@@ -241,6 +251,73 @@ def _set_output_field(tool_response: dict[str, Any], field_path: str, value: str
         tool_response[field_path] = value
 
 
+# Spilled-output detection: when a tool returns >50K chars Claude Code persists
+# the full output to disk and replaces it with a {file_path, preview, ...} stub.
+# The exact JSON shape is undocumented, so we treat any of these companion keys
+# alongside `file_path` as a spill marker.
+_SPILL_INDICATORS = ("truncated", "preview", "byte_size", "output_file")
+_SPILLED_FILE_BYTES_CAP = 1024 * 1024  # 1 MiB cap on per-spill scan
+
+
+def _detect_spilled_output(tool_response: dict[str, Any]) -> str | None:
+    """Return the spilled-output file path if `tool_response` looks like a spill stub."""
+    fp = tool_response.get("file_path")
+    if isinstance(fp, str) and fp and any(k in tool_response for k in _SPILL_INDICATORS):
+        return fp
+    return None
+
+
+def _read_spilled_file(path: str) -> tuple[str | None, str | None]:
+    """Read up to _SPILLED_FILE_BYTES_CAP bytes from a spilled-output file.
+
+    Returns (text, error). The path is whatever Claude Code wrote (typically a
+    temp file under /tmp or platform-equivalent), so we accept any absolute
+    path -- enforcing project_dir would refuse to scan CC's own buffer.
+    """
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        return None, f"spilled output path '{path}' is not absolute -- skipping scan"
+    try:
+        with p.open("rb") as f:
+            data = f.read(_SPILLED_FILE_BYTES_CAP + 1)
+    except OSError as e:
+        return None, f"cannot read spilled output '{path}': {e}"
+    if len(data) > _SPILLED_FILE_BYTES_CAP:
+        data = data[:_SPILLED_FILE_BYTES_CAP]
+    return data.decode("utf-8", errors="replace"), None
+
+
+def _classify_tool_output(
+    tool_name: str, tool_response: Any
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Return (redactable_fields, scan_only_fields) for `tool_response`.
+
+    Redactable fields can be rewritten via _set_output_field and shipped back
+    in `hookSpecificOutput.updatedToolOutput`. Scan-only fields can match
+    block/warn rules but cannot be rewritten in place: spilled-output files
+    (CC has already given the model a preview of them) and recursive walks
+    over unknown dict shapes.
+    """
+    redactable = _iter_output_fields(tool_name, tool_response)
+    scan_only: list[tuple[str, str]] = []
+    if not isinstance(tool_response, dict):
+        return redactable, scan_only
+    fp = _detect_spilled_output(tool_response)
+    if fp is not None:
+        content, err = _read_spilled_file(fp)
+        if err is not None:
+            sys.stderr.write(f"redaction_hooks: {err}\n")
+        elif content:
+            scan_only.append((f"<spilled:{fp}>", content))
+    if not redactable and not scan_only:
+        # Unknown dict shape -- walk recursively so future schema drift doesn't
+        # silently skip scanning.
+        for s in _walk_strings(tool_response):
+            if s:
+                scan_only.append(("<recursive>", s))
+    return redactable, scan_only
+
+
 def _build_block_response(reasons: list[str]) -> dict[str, Any]:
     """Build a blocking response for PreToolUse."""
     return {
@@ -255,9 +332,18 @@ def _build_block_response(reasons: list[str]) -> dict[str, Any]:
 
 
 def _build_redact_response(
-    original_input: dict[str, Any], redacted_content: str, tool_name: str
+    original_input: dict[str, Any],
+    redacted_content: str,
+    tool_name: str,
+    rule_ids: list[str],
 ) -> dict[str, Any]:
-    """Build a response with redacted content."""
+    """Build a response with redacted content.
+
+    `additionalContext` informs the model that one or more rules rewrote its
+    input -- the model should not be surprised when the on-disk artifact
+    differs from what it tried to write. Rule IDs are included; matched text
+    is never echoed.
+    """
     updated_input = dict(original_input)
     if tool_name in ("Write", "Edit", "MultiEdit"):
         if "content" in updated_input:
@@ -273,6 +359,9 @@ def _build_redact_response(
             "permissionDecision": "allow",
             "permissionDecisionReason": "Content redacted",
             "updatedInput": updated_input,
+            "additionalContext": (
+                f"Redaction hook rewrote tool input to satisfy rules: {rule_ids}"
+            ),
         },
         "continue": True,
         "systemMessage": "Content was redacted before execution",
@@ -358,6 +447,7 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
     """Handle PreToolUse hook event."""
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
+    tool_use_id = data.get("tool_use_id")
 
     rules = load_rules(project_dir)
     if not rules:
@@ -414,20 +504,33 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
         timeouts.extend(fc_timeouts)
         # Immediately block if file was unreadable
         if fc_block_reasons:
-            _audit_timeouts("PreToolUse", timeouts, tool=tool_name, project_dir=project_dir)
+            _audit_timeouts(
+                "PreToolUse",
+                timeouts,
+                tool=tool_name,
+                tool_use_id=tool_use_id,
+                project_dir=project_dir,
+            )
             unreadable_ids = sorted({r.id for r in file_content_rules if r.action == "block"})
             log_event(
                 hook="PreToolUse",
                 action="block-unreadable",
                 rule_ids=unreadable_ids,
                 tool=tool_name,
+                tool_use_id=tool_use_id,
                 project_dir=project_dir,
             )
             json.dump(_build_block_response(fc_block_reasons), sys.stdout)
             sys.stderr.write(f"Blocked: {'; '.join(fc_block_reasons)}\n")
             return 2
 
-    _audit_timeouts("PreToolUse", timeouts, tool=tool_name, project_dir=project_dir)
+    _audit_timeouts(
+        "PreToolUse",
+        timeouts,
+        tool=tool_name,
+        tool_use_id=tool_use_id,
+        project_dir=project_dir,
+    )
 
     if not all_matches:
         json.dump({"continue": True}, sys.stdout)
@@ -443,6 +546,7 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
         "warn",
         [m for m in all_matches if m.rule.action == "warn"],
         tool=tool_name,
+        tool_use_id=tool_use_id,
         project_dir=project_dir,
     )
 
@@ -452,6 +556,7 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
             "block",
             [m for m in all_matches if m.rule.action == "block"],
             tool=tool_name,
+            tool_use_id=tool_use_id,
             project_dir=project_dir,
         )
         json.dump(_build_block_response(result.block_reasons), sys.stdout)
@@ -459,14 +564,20 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
         return 2
 
     if content and result.redacted_text and result.redacted_text != content:
+        redact_matches = [m for m in all_matches if m.rule.action == "redact"]
         _audit(
             "PreToolUse",
             "redact",
-            [m for m in all_matches if m.rule.action == "redact"],
+            redact_matches,
             tool=tool_name,
+            tool_use_id=tool_use_id,
             project_dir=project_dir,
         )
-        json.dump(_build_redact_response(tool_input, result.redacted_text, tool_name), sys.stdout)
+        rule_ids = sorted({m.rule.id for m in redact_matches})
+        json.dump(
+            _build_redact_response(tool_input, result.redacted_text, tool_name, rule_ids),
+            sys.stdout,
+        )
         return 0
 
     json.dump({"continue": True}, sys.stdout)
@@ -522,12 +633,27 @@ def handle_user_prompt_submit(data: dict[str, Any], project_dir: Path | None = N
         sys.stderr.write(f"Prompt blocked: {'; '.join(result.block_reasons)}\n")
         return 2
 
-    # Warn about redact matches - UserPromptSubmit doesn't support updatedInput
+    # UserPromptSubmit doesn't support updatedInput, so we cannot rewrite the
+    # prompt -- but we can inject `additionalContext` so the model is aware that
+    # rules matched (and ideally avoids echoing the matched content back).
     redact_matches = [m for m in matches if m.rule.action == "redact"]
     if redact_matches:
-        ids = ", ".join(m.rule.id for m in redact_matches)
-        sys.stderr.write(f"Warning: redact rules [{ids}] cannot modify prompts\n")
+        ids = sorted({m.rule.id for m in redact_matches})
+        sys.stderr.write(f"Warning: redact rules {ids} cannot modify prompts\n")
         _audit("UserPromptSubmit", "redact", redact_matches, project_dir=project_dir)
+        redact_response: dict[str, Any] = {
+            "continue": True,
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": (
+                    f"Redaction hook: rules {ids} matched the user's prompt but "
+                    "cannot rewrite it. Treat any matched content as sensitive and "
+                    "do not echo it back."
+                ),
+            },
+        }
+        json.dump(redact_response, sys.stdout)
+        return 0
 
     json.dump({"continue": True}, sys.stdout)
     return 0
@@ -543,14 +669,15 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
     """
     tool_name = data.get("tool_name", "")
     tool_response = data.get("tool_response")
+    tool_use_id = data.get("tool_use_id")
 
     rules = load_rules(project_dir)
     if not rules:
         json.dump({"continue": True}, sys.stdout)
         return 0
 
-    fields = _iter_output_fields(tool_name, tool_response)
-    if not fields:
+    fields, scan_only = _classify_tool_output(tool_name, tool_response)
+    if not fields and not scan_only:
         json.dump({"continue": True}, sys.stdout)
         return 0
 
@@ -559,6 +686,9 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
     warn_reasons: list[str] = []
     redacted_fields: list[tuple[str, str]] = []
     all_matches: list[Match] = []
+    writable_redact: list[Match] = []
+    skipped_redact: list[Match] = []
+    skipped_labels: list[str] = []
     timeouts: list[str] = []
 
     for field_path, content in fields:
@@ -567,13 +697,34 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
         if not matches:
             continue
         all_matches.extend(matches)
+        writable_redact.extend(m for m in matches if m.rule.action == "redact")
         result = apply_actions(content, matches, project_dir)
         block_reasons.extend(result.block_reasons)
         warn_reasons.extend(result.warn_reasons)
         if result.redacted_text is not None and result.redacted_text != content:
             redacted_fields.append((field_path, result.redacted_text))
 
-    _audit_timeouts("PostToolUse", timeouts, tool=tool_name, project_dir=project_dir)
+    for label, content in scan_only:
+        matches = matcher.scan(content, "tool", tool_name)
+        timeouts.extend(matcher.last_timeouts)
+        if not matches:
+            continue
+        all_matches.extend(matches)
+        result = apply_actions(content, matches, project_dir)
+        block_reasons.extend(result.block_reasons)
+        warn_reasons.extend(result.warn_reasons)
+        rmatches = [m for m in matches if m.rule.action == "redact"]
+        if rmatches:
+            skipped_redact.extend(rmatches)
+            skipped_labels.append(label)
+
+    _audit_timeouts(
+        "PostToolUse",
+        timeouts,
+        tool=tool_name,
+        tool_use_id=tool_use_id,
+        project_dir=project_dir,
+    )
 
     if warn_reasons:
         _emit_warnings(warn_reasons)
@@ -582,6 +733,7 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
         "warn",
         [m for m in all_matches if m.rule.action == "warn"],
         tool=tool_name,
+        tool_use_id=tool_use_id,
         project_dir=project_dir,
     )
 
@@ -591,6 +743,7 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
             "block",
             [m for m in all_matches if m.rule.action == "block"],
             tool=tool_name,
+            tool_use_id=tool_use_id,
             project_dir=project_dir,
         )
         response = {
@@ -602,26 +755,60 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
         sys.stderr.write(f"Tool output blocked: {'; '.join(block_reasons)}\n")
         return 2
 
-    redact_matches = [m for m in all_matches if m.rule.action == "redact"]
+    if skipped_redact:
+        labels = sorted(set(skipped_labels))
+        sys.stderr.write(
+            f"Warning: redact rules matched in non-redactable output {labels}; "
+            "output already shown to model -- consider switching to block\n"
+        )
+        log_event(
+            hook="PostToolUse",
+            action="redact-skipped",
+            rule_ids=sorted({m.rule.id for m in skipped_redact}),
+            tool=tool_name,
+            tool_use_id=tool_use_id,
+            project_dir=project_dir,
+        )
 
     if not redacted_fields:
         # Redact rules may have matched but produced no text change (e.g. mapping
         # collision producing same string), or there were no redact matches at all.
-        if redact_matches:
-            _audit("PostToolUse", "redact", redact_matches, tool=tool_name, project_dir=project_dir)
+        if writable_redact:
+            _audit(
+                "PostToolUse",
+                "redact",
+                writable_redact,
+                tool=tool_name,
+                tool_use_id=tool_use_id,
+                project_dir=project_dir,
+            )
         json.dump({"continue": True}, sys.stdout)
         return 0
 
     if not isinstance(tool_response, dict):
         sys.stderr.write(f"Warning: cannot redact non-dict tool_response for {tool_name}\n")
-        _audit("PostToolUse", "redact", redact_matches, tool=tool_name, project_dir=project_dir)
+        _audit(
+            "PostToolUse",
+            "redact",
+            writable_redact,
+            tool=tool_name,
+            tool_use_id=tool_use_id,
+            project_dir=project_dir,
+        )
         json.dump({"continue": True}, sys.stdout)
         return 0
 
     for field_path, redacted in redacted_fields:
         _set_output_field(tool_response, field_path, redacted)
 
-    _audit("PostToolUse", "redact", redact_matches, tool=tool_name, project_dir=project_dir)
+    _audit(
+        "PostToolUse",
+        "redact",
+        writable_redact,
+        tool=tool_name,
+        tool_use_id=tool_use_id,
+        project_dir=project_dir,
+    )
     response = {
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
@@ -630,6 +817,76 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
         "systemMessage": "Tool output was redacted before being shown to the model",
     }
     json.dump(response, sys.stdout)
+    return 0
+
+
+def handle_post_tool_use_failure(data: dict[str, Any], project_dir: Path | None = None) -> int:
+    """Handle PostToolUseFailure - scan a failed tool call's input + error.
+
+    PostToolUseFailure cannot block or rewrite (the call already failed), so
+    matches are warned to stderr and audited. The handler scans the tool input
+    (via the existing PreToolUse extractor) and the `tool_error` / `tool_output`
+    payload. This catches secrets that survived past PreToolUse because the
+    failure path skipped the success-side PostToolUse hook.
+    """
+    tool_name = data.get("tool_name", "")
+    tool_input = data.get("tool_input", {})
+    tool_error = data.get("tool_error", "")
+    tool_response = data.get("tool_output") or data.get("tool_response")
+    tool_use_id = data.get("tool_use_id")
+
+    rules = load_rules(project_dir)
+    if not rules:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    matcher = PatternMatcher(rules)
+    all_matches: list[Match] = []
+    timeouts: list[str] = []
+
+    input_content = _get_tool_input_content(tool_name, tool_input)
+    if input_content:
+        all_matches.extend(matcher.scan(input_content, "tool", tool_name))
+        timeouts.extend(matcher.last_timeouts)
+
+    if isinstance(tool_error, str) and tool_error:
+        all_matches.extend(matcher.scan(tool_error, "tool", tool_name))
+        timeouts.extend(matcher.last_timeouts)
+
+    if tool_response is not None:
+        for _, content in _iter_output_fields(tool_name, tool_response):
+            all_matches.extend(matcher.scan(content, "tool", tool_name))
+            timeouts.extend(matcher.last_timeouts)
+
+    _audit_timeouts(
+        "PostToolUseFailure",
+        timeouts,
+        tool=tool_name,
+        tool_use_id=tool_use_id,
+        project_dir=project_dir,
+    )
+
+    if not all_matches:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    rule_ids = sorted({m.rule.id for m in all_matches})
+    sys.stderr.write(
+        f"PostToolUseFailure warning: rules {rule_ids} matched in failed {tool_name} call\n"
+    )
+    for action in ("warn", "block", "redact"):
+        action_matches = [m for m in all_matches if m.rule.action == action]
+        if action_matches:
+            _audit(
+                "PostToolUseFailure",
+                action,
+                action_matches,
+                tool=tool_name,
+                tool_use_id=tool_use_id,
+                project_dir=project_dir,
+            )
+
+    json.dump({"continue": True}, sys.stdout)
     return 0
 
 
@@ -643,6 +900,171 @@ def _walk_strings(obj: Any) -> Iterator[str]:
     elif isinstance(obj, list):
         for item in obj:
             yield from _walk_strings(item)
+
+
+def handle_instructions_loaded(data: dict[str, Any], project_dir: Path | None = None) -> int:
+    """Handle InstructionsLoaded - scan a loaded CLAUDE.md / rules file for secrets.
+
+    Fires when Claude Code loads a memory file (CLAUDE.md, `.claude/rules/*.md`).
+    The hook has no decision control per the docs, so this handler only reports
+    matches via stderr + audit. Detects committed secrets in rule files and
+    user-scope memory.
+    """
+    file_path = data.get("file_path", "")
+    memory_type = data.get("memory_type", "Unknown")
+    load_reason = data.get("load_reason", "unknown")
+
+    if not file_path:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    rules = load_rules(project_dir)
+    llm_rules = [r for r in rules if r.target in ("llm", "both")]
+    if not llm_rules:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    p = Path(file_path).expanduser()
+    try:
+        with p.open("rb") as f:
+            data_bytes = f.read(_SPILLED_FILE_BYTES_CAP + 1)
+    except OSError as e:
+        sys.stderr.write(f"InstructionsLoaded: cannot read {file_path}: {e}\n")
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+    if len(data_bytes) > _SPILLED_FILE_BYTES_CAP:
+        data_bytes = data_bytes[:_SPILLED_FILE_BYTES_CAP]
+    content = data_bytes.decode("utf-8", errors="replace")
+
+    matcher = PatternMatcher(llm_rules)
+    matches = matcher.scan(content, "llm")
+    _audit_timeouts("InstructionsLoaded", matcher.last_timeouts, project_dir=project_dir)
+
+    if not matches:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    rule_ids = sorted({m.rule.id for m in matches})
+    sys.stderr.write(
+        f"InstructionsLoaded warning: rules {rule_ids} matched in {memory_type} "
+        f"file {file_path} (load_reason={load_reason})\n"
+    )
+    for action in ("warn", "block", "redact"):
+        action_matches = [m for m in matches if m.rule.action == action]
+        if action_matches:
+            _audit("InstructionsLoaded", action, action_matches, project_dir=project_dir)
+
+    json.dump({"continue": True}, sys.stdout)
+    return 0
+
+
+def _last_assistant_text(transcript_path: str) -> tuple[str | None, str | None]:
+    """Read `transcript_path` and return (text, error).
+
+    Returns the concatenated string content of the LAST assistant turn in the
+    JSONL transcript -- the message Claude is about to deliver when Stop /
+    SubagentStop fires. The exact role-key isn't documented; we accept any of
+    `type`, `role`, or a nested `message.role`/`message.type`.
+    """
+    try:
+        with Path(transcript_path).open(encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError as e:
+        return None, f"cannot read transcript {transcript_path}: {e}"
+    last: dict[str, Any] | None = None
+    for line in lines:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        kind = obj.get("type") or obj.get("role")
+        msg = obj.get("message")
+        if not kind and isinstance(msg, dict):
+            kind = msg.get("role") or msg.get("type")
+        if kind == "assistant":
+            last = obj
+    if last is None:
+        return "", None
+    return "\n".join(_walk_strings(last)), None
+
+
+def handle_stop(data: dict[str, Any], project_dir: Path | None = None) -> int:
+    """Handle Stop / SubagentStop - scan the last assistant message for leaks.
+
+    Both events fire after the message has been delivered, so we cannot redact
+    in-flight. Block (decision:block) would just force Claude to keep talking,
+    not unsend the message -- so this handler is warn-only.
+    """
+    transcript_path = data.get("transcript_path", "")
+    hook_event = data.get("hook_event_name", "Stop")
+    if not transcript_path:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    rules = load_rules(project_dir)
+    llm_rules = [r for r in rules if r.target in ("llm", "both")]
+    if not llm_rules:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    text, err = _last_assistant_text(transcript_path)
+    if err is not None:
+        sys.stderr.write(f"{hook_event}: {err}\n")
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+    if not text:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    matcher = PatternMatcher(llm_rules)
+    matches = matcher.scan(text, "llm")
+    _audit_timeouts(hook_event, matcher.last_timeouts, project_dir=project_dir)
+    if not matches:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    rule_ids = sorted({m.rule.id for m in matches})
+    sys.stderr.write(f"{hook_event} warning: rules {rule_ids} matched in last assistant message\n")
+    for action in ("warn", "block", "redact"):
+        action_matches = [m for m in matches if m.rule.action == action]
+        if action_matches:
+            _audit(hook_event, action, action_matches, project_dir=project_dir)
+    json.dump({"continue": True}, sys.stdout)
+    return 0
+
+
+def _scan_transcript(
+    transcript_path: str, project_dir: Path | None
+) -> tuple[list[Match], list[str], str | None]:
+    """Scan every string in every JSONL line of `transcript_path` against llm rules.
+
+    Returns (matches, regex_timeouts, error). When llm rules are empty or the
+    transcript is unreadable, matches is empty and an error string explains.
+    """
+    rules = load_rules(project_dir)
+    llm_rules = [r for r in rules if r.target in ("llm", "both")]
+    if not llm_rules:
+        return [], [], None
+    try:
+        with Path(transcript_path).open(encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError as e:
+        return [], [], f"cannot read transcript {transcript_path}: {e}"
+
+    matcher = PatternMatcher(llm_rules)
+    matches: list[Match] = []
+    timeouts: list[str] = []
+    for line in lines:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        for text in _walk_strings(obj):
+            matches.extend(matcher.scan(text, "llm"))
+            timeouts.extend(matcher.last_timeouts)
+    return matches, timeouts, None
 
 
 def handle_pre_compact(data: dict[str, Any], project_dir: Path | None = None) -> int:
@@ -664,31 +1086,11 @@ def handle_pre_compact(data: dict[str, Any], project_dir: Path | None = None) ->
         json.dump({"continue": True}, sys.stdout)
         return 0
 
-    rules = load_rules(project_dir)
-    llm_rules = [r for r in rules if r.target in ("llm", "both")]
-    if not llm_rules:
+    all_matches, timeouts, err = _scan_transcript(transcript_path, project_dir)
+    if err is not None:
+        sys.stderr.write(f"PreCompact: {err}\n")
         json.dump({"continue": True}, sys.stdout)
         return 0
-
-    try:
-        with Path(transcript_path).open(encoding="utf-8", errors="replace") as f:
-            transcript_lines = f.readlines()
-    except OSError as e:
-        sys.stderr.write(f"PreCompact: cannot read transcript {transcript_path}: {e}\n")
-        json.dump({"continue": True}, sys.stdout)
-        return 0
-
-    matcher = PatternMatcher(llm_rules)
-    all_matches: list[Match] = []
-    timeouts: list[str] = []
-    for line in transcript_lines:
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        for text in _walk_strings(obj):
-            all_matches.extend(matcher.scan(text, "llm"))
-            timeouts.extend(matcher.last_timeouts)
 
     _audit_timeouts("PreCompact", timeouts, project_dir=project_dir)
 
@@ -731,6 +1133,45 @@ def handle_pre_compact(data: dict[str, Any], project_dir: Path | None = None) ->
     return 0
 
 
+def handle_post_compact(data: dict[str, Any], project_dir: Path | None = None) -> int:
+    """Handle PostCompact - audit any rule matches in the post-compaction transcript.
+
+    PostCompact has no decision control (per docs): compaction has already
+    happened. This handler only audits + warns to surface that the summary
+    contains content rules would have flagged.
+    """
+    transcript_path = data.get("transcript_path", "")
+    trigger = data.get("trigger", "unknown")
+
+    if not transcript_path:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    all_matches, timeouts, err = _scan_transcript(transcript_path, project_dir)
+    if err is not None:
+        sys.stderr.write(f"PostCompact: {err}\n")
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    _audit_timeouts("PostCompact", timeouts, project_dir=project_dir)
+    if not all_matches:
+        json.dump({"continue": True}, sys.stdout)
+        return 0
+
+    rule_ids = sorted({m.rule.id for m in all_matches})
+    sys.stderr.write(
+        f"PostCompact warning: rules {rule_ids} matched in compacted transcript "
+        f"(trigger={trigger})\n"
+    )
+    for action in ("warn", "block", "redact"):
+        action_matches = [m for m in all_matches if m.rule.action == action]
+        if action_matches:
+            _audit("PostCompact", action, action_matches, project_dir=project_dir)
+
+    json.dump({"continue": True}, sys.stdout)
+    return 0
+
+
 def run_hook(project_dir: Path | None = None) -> int:
     """Main hook entry point. Reads JSON from stdin, dispatches to handler."""
     try:
@@ -745,10 +1186,18 @@ def run_hook(project_dir: Path | None = None) -> int:
         return handle_pre_tool_use(data, project_dir)
     if event == "PostToolUse":
         return handle_post_tool_use(data, project_dir)
+    if event == "PostToolUseFailure":
+        return handle_post_tool_use_failure(data, project_dir)
     if event == "UserPromptSubmit":
         return handle_user_prompt_submit(data, project_dir)
     if event == "PreCompact":
         return handle_pre_compact(data, project_dir)
+    if event == "PostCompact":
+        return handle_post_compact(data, project_dir)
+    if event == "InstructionsLoaded":
+        return handle_instructions_loaded(data, project_dir)
+    if event in ("Stop", "SubagentStop"):
+        return handle_stop(data, project_dir)
 
     # Unknown or unsupported event, allow to continue
     json.dump({"continue": True}, sys.stdout)

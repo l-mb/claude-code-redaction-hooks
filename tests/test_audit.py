@@ -38,6 +38,23 @@ def test_log_event_appends_jsonl(tmp_path: Path) -> None:
     assert entries[1]["rule_ids"] == ["email", "ssn"]
 
 
+def test_log_event_records_tool_use_id(tmp_path: Path) -> None:
+    """`tool_use_id` (when supplied) is persisted to allow pre/post correlation."""
+    log_event(
+        "PreToolUse",
+        "block",
+        ["aws-key"],
+        tool="Bash",
+        tool_use_id="toolu_abc123",
+        project_dir=tmp_path,
+    )
+    log_event("PostToolUse", "block", ["aws-key"], project_dir=tmp_path)
+    entries = read_entries(tmp_path)
+    assert entries[0]["tool_use_id"] == "toolu_abc123"
+    # Omitted tool_use_id is not persisted as None
+    assert "tool_use_id" not in entries[1]
+
+
 def test_log_event_skips_when_no_rule_ids(tmp_path: Path) -> None:
     """Empty rule_ids list is a no-op (no entry written)."""
     log_event("PreToolUse", "warn", [], tool="Bash", project_dir=tmp_path)

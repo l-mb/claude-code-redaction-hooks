@@ -70,6 +70,7 @@ def log_event(
     rule_ids: list[str],
     *,
     tool: str | None = None,
+    tool_use_id: str | None = None,
     project_dir: Path | None = None,
 ) -> None:
     """Append a single audit entry. Failures are swallowed so a broken
@@ -84,6 +85,8 @@ def log_event(
     }
     if tool is not None:
         entry["tool"] = tool
+    if tool_use_id is not None:
+        entry["tool_use_id"] = tool_use_id
     line = (json.dumps(entry, separators=(",", ":")) + "\n").encode("utf-8")
     path = _audit_path(project_dir)
     try:
