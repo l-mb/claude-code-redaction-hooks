@@ -442,6 +442,62 @@ rules:
     assert "cannot redact non-dict" in stderr.getvalue()
 
 
+def test_post_tool_use_blocks_secret_in_real_read_shape(rules_dir: Path) -> None:
+    """Real CC Read tool_response shape: {type, file: {content, filePath, ...}}.
+
+    The content lives at `tool_response.file.content`, not at top level.
+    """
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_response": {
+            "type": "text",
+            "file": {
+                "filePath": "/tmp/sample.txt",
+                "content": "aws_key = AKIAIOSFODNN7EXAMPLE\n",
+                "numLines": 1,
+                "startLine": 1,
+                "totalLines": 1,
+            },
+        },
+    }
+    code, output = capture_output(handle_post_tool_use, data, rules_dir)
+    assert code == 2
+    assert output["decision"] == "block"
+    assert "aws-key" in output["reason"]
+
+
+def test_post_tool_use_redacts_in_real_read_shape(rules_dir: Path) -> None:
+    """Redact rewrite preserves the nested {file: {content}} shape."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_response": {
+            "type": "text",
+            "file": {
+                "filePath": "/tmp/sample.txt",
+                "content": "contact: alice@secret.com",
+                "numLines": 1,
+                "startLine": 1,
+                "totalLines": 1,
+            },
+        },
+    }
+    code, output = capture_output(handle_post_tool_use, data, rules_dir)
+    assert code == 0
+    updated = output["hookSpecificOutput"]["updatedToolOutput"]
+    # The rewrite must land in the nested file.content -- not at top level.
+    assert "alice@secret.com" not in updated["file"]["content"]
+    assert "@example.com" in updated["file"]["content"]
+    assert updated["type"] == "text"  # sibling fields preserved
+    assert updated["file"]["filePath"] == "/tmp/sample.txt"
+    assert updated["file"]["numLines"] == 1
+
+
 def test_post_tool_use_blocks_spilled_output_file(tmp_path: Path) -> None:
     """A spill stub ({file_path, preview, ...}) is scanned by reading the file."""
     from redaction_hooks.hooks import handle_post_tool_use
@@ -611,7 +667,10 @@ rules:
 
 
 def test_post_tool_use_failure_audits_error_match(tmp_path: Path) -> None:
-    """A secret echoed back in `tool_error` is audited (warn-only -- exit 0)."""
+    """A secret echoed back in `error` is audited (warn-only -- exit 0).
+
+    Real CC 2.1.x failure payload uses key `error` (not `tool_error`).
+    """
     from redaction_hooks.audit import read_entries
     from redaction_hooks.hooks import handle_post_tool_use_failure
 
@@ -627,7 +686,9 @@ rules:
         "tool_name": "Bash",
         "tool_use_id": "toolu_failed_1",
         "tool_input": {"command": "aws s3 ls"},
-        "tool_error": "InvalidAccessKey: AKIAIOSFODNN7EXAMPLE is not valid",
+        "error": "InvalidAccessKey: AKIAIOSFODNN7EXAMPLE is not valid",
+        "is_interrupt": False,
+        "duration_ms": 38,
     }
     stderr = io.StringIO()
     with patch.object(sys, "stderr", stderr):
@@ -639,6 +700,28 @@ rules:
     assert audits
     assert audits[0]["tool_use_id"] == "toolu_failed_1"
     assert "aws-key" in audits[0]["rule_ids"]
+
+
+def test_post_tool_use_failure_ignores_legacy_tool_error_key(tmp_path: Path) -> None:
+    """Regression guard: only `error` is read, not the previous `tool_error` guess."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_post_tool_use_failure
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PostToolUseFailure",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+        "tool_error": "AKIAIOSFODNN7EXAMPLE",  # wrong key; must NOT be scanned
+    }
+    code, _ = capture_output(handle_post_tool_use_failure, data, tmp_path)
+    assert code == 0
+    assert read_entries(tmp_path) == []
 
 
 def test_post_tool_use_failure_scans_input_too(tmp_path: Path) -> None:
@@ -656,7 +739,7 @@ rules:
         "hook_event_name": "PostToolUseFailure",
         "tool_name": "Bash",
         "tool_input": {"command": "echo AKIAIOSFODNN7EXAMPLE && false"},
-        "tool_error": "exit code 1",
+        "error": "exit code 1",
     }
     stderr = io.StringIO()
     with patch.object(sys, "stderr", stderr):
@@ -680,7 +763,7 @@ rules:
         "hook_event_name": "PostToolUseFailure",
         "tool_name": "Bash",
         "tool_input": {"command": "ls /nonexistent"},
-        "tool_error": "No such file or directory",
+        "error": "No such file or directory",
     }
     code, output = capture_output(handle_post_tool_use_failure, data, tmp_path)
     assert code == 0
@@ -695,7 +778,7 @@ def test_run_hook_dispatches_post_tool_use_failure(tmp_path: Path) -> None:
         "hook_event_name": "PostToolUseFailure",
         "tool_name": "Bash",
         "tool_input": {"command": "ls"},
-        "tool_error": "ok",
+        "error": "ok",
     }
     stdin = io.StringIO(json.dumps(data))
     stdout = io.StringIO()

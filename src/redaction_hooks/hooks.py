@@ -205,13 +205,28 @@ def _get_tool_input_content(tool_name: str, tool_input: dict[str, Any]) -> str |
     return None
 
 
+def _get_nested(obj: Any, dotted: str) -> Any:
+    """Walk `obj` along a dotted key path; return None if any step is missing."""
+    cur = obj
+    for part in dotted.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
 def _iter_output_fields(tool_name: str, tool_response: Any) -> list[tuple[str, str]]:
     """Return (field_path, content) pairs for each scannable string field in tool_response.
 
     Each field is scanned and redacted independently so the response shape required by
     `hookSpecificOutput.updatedToolOutput` is preserved. `field_path` is a dict key,
-    or `matches[i]` for elements of a Grep/Glob matches list, or "" when the response
-    itself is a string.
+    a dotted path for nested keys (e.g. `file.content` for Read), `matches[i]` for
+    elements of a Grep/Glob matches list, or "" when the response itself is a string.
+
+    Per-tool field lists were verified against real CC 2.1.x payloads:
+      - Bash:  {stdout, stderr, interrupted, isImage, noOutputExpected}
+      - Read:  {type, file: {content, filePath, numLines, startLine, totalLines}}
+      - REPL:  {code, result, stdout, stderr}
     """
     if not isinstance(tool_response, dict):
         text = str(tool_response) if tool_response else ""
@@ -219,7 +234,11 @@ def _iter_output_fields(tool_name: str, tool_response: Any) -> list[tuple[str, s
 
     if tool_name == "Bash":
         string_fields: tuple[str, ...] = ("stdout", "stderr", "output")
-    elif tool_name in ("Read", "WebFetch"):
+    elif tool_name == "Read":
+        # Real shape nests under `file`; the bare keys are kept as fallback for
+        # unit-test fixtures and any future API simplification.
+        string_fields = ("file.content", "content", "output")
+    elif tool_name == "WebFetch":
         string_fields = ("content", "output")
     elif tool_name in ("Grep", "Glob"):
         string_fields = ("output",)
@@ -228,7 +247,7 @@ def _iter_output_fields(tool_name: str, tool_response: Any) -> list[tuple[str, s
 
     fields: list[tuple[str, str]] = []
     for key in string_fields:
-        val = tool_response.get(key)
+        val = _get_nested(tool_response, key) if "." in key else tool_response.get(key)
         if isinstance(val, str) and val:
             fields.append((key, val))
 
@@ -243,12 +262,23 @@ def _iter_output_fields(tool_name: str, tool_response: Any) -> list[tuple[str, s
 
 
 def _set_output_field(tool_response: dict[str, Any], field_path: str, value: str) -> None:
-    """Write `value` back to `tool_response` at `field_path` (set by _iter_output_fields)."""
+    """Write `value` back to `tool_response` at `field_path` (set by _iter_output_fields).
+
+    Supports plain keys (`stdout`), dotted paths (`file.content`), and indexed
+    paths (`matches[0]`).
+    """
     if "[" in field_path:
         key, idx_part = field_path.split("[", 1)
         tool_response[key][int(idx_part.rstrip("]"))] = value
-    else:
-        tool_response[field_path] = value
+        return
+    if "." in field_path:
+        parts = field_path.split(".")
+        cur: Any = tool_response
+        for part in parts[:-1]:
+            cur = cur[part]
+        cur[parts[-1]] = value
+        return
+    tool_response[field_path] = value
 
 
 # Spilled-output detection: when a tool returns >50K chars Claude Code persists
@@ -823,16 +853,18 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
 def handle_post_tool_use_failure(data: dict[str, Any], project_dir: Path | None = None) -> int:
     """Handle PostToolUseFailure - scan a failed tool call's input + error.
 
-    PostToolUseFailure cannot block or rewrite (the call already failed), so
-    matches are warned to stderr and audited. The handler scans the tool input
-    (via the existing PreToolUse extractor) and the `tool_error` / `tool_output`
-    payload. This catches secrets that survived past PreToolUse because the
-    failure path skipped the success-side PostToolUse hook.
+    Verified against a real CC 2.1.x payload: the failure event carries
+    `error` (a string), `tool_input`, `tool_use_id`, `is_interrupt`, and
+    `duration_ms` -- no `tool_output` / `tool_response` field. PostToolUseFailure
+    cannot block or rewrite (the call already failed), so matches are warned
+    to stderr and audited. The handler scans the tool input (via the existing
+    PreToolUse extractor) and the `error` string. This catches secrets that
+    survived past PreToolUse because the failure path skipped the success-side
+    PostToolUse hook.
     """
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
-    tool_error = data.get("tool_error", "")
-    tool_response = data.get("tool_output") or data.get("tool_response")
+    tool_error = data.get("error", "")
     tool_use_id = data.get("tool_use_id")
 
     rules = load_rules(project_dir)
@@ -852,11 +884,6 @@ def handle_post_tool_use_failure(data: dict[str, Any], project_dir: Path | None 
     if isinstance(tool_error, str) and tool_error:
         all_matches.extend(matcher.scan(tool_error, "tool", tool_name))
         timeouts.extend(matcher.last_timeouts)
-
-    if tool_response is not None:
-        for _, content in _iter_output_fields(tool_name, tool_response):
-            all_matches.extend(matcher.scan(content, "tool", tool_name))
-            timeouts.extend(matcher.last_timeouts)
 
     _audit_timeouts(
         "PostToolUseFailure",
