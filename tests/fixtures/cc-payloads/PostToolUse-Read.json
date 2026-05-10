@@ -1,0 +1,24 @@
+{
+  "session_id": "<SESSION>",
+  "transcript_path": "<HOME>/.claude/projects/-<PROJECT>/<SESSION>.jsonl",
+  "cwd": "<HOME>/<PROJECT>",
+  "permission_mode": "auto",
+  "effort": {"level": "high"},
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "<HOME>/<PROJECT>/README.md"
+  },
+  "tool_response": {
+    "type": "text",
+    "file": {
+      "filePath": "<HOME>/<PROJECT>/README.md",
+      "content": "# Sample\n\nFirst paragraph of the file.\n",
+      "numLines": 3,
+      "startLine": 1,
+      "totalLines": 3
+    }
+  },
+  "tool_use_id": "<TOOL_USE>",
+  "duration_ms": 7
+}

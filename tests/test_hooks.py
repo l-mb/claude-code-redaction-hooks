@@ -164,6 +164,57 @@ def test_run_hook_unknown_event(rules_dir: Path) -> None:
     assert output["continue"] is True
 
 
+def test_run_hook_dumps_payload_when_env_var_set(
+    rules_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """REDACT_HOOK_DUMP_DIR captures raw stdin to a per-call file; default unchanged."""
+    dump_dir = tmp_path / "dump"
+    monkeypatch.setenv("REDACT_HOOK_DUMP_DIR", str(dump_dir))
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "ok", "file_path": "x.py"},
+    }
+    raw = json.dumps(data)
+    stdin = io.StringIO(raw)
+    stdout = io.StringIO()
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+        run_hook(rules_dir)
+    files = list(dump_dir.iterdir())
+    assert len(files) == 1
+    assert files[0].name.startswith("PreToolUse-")
+    assert files[0].name.endswith(".json")
+    assert json.loads(files[0].read_text()) == data
+
+
+def test_run_hook_dump_disabled_by_default(rules_dir: Path, tmp_path: Path) -> None:
+    """No env var = no dump file. Default behaviour must be unchanged."""
+    dump_dir = tmp_path / "dump"
+    data = {"hook_event_name": "UnknownEvent"}
+    stdin = io.StringIO(json.dumps(data))
+    stdout = io.StringIO()
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+        run_hook(rules_dir)
+    assert not dump_dir.exists()
+
+
+def test_run_hook_dumps_invalid_json(
+    rules_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Invalid stdin still gets dumped (with event=InvalidJSON) so we can debug it."""
+    dump_dir = tmp_path / "dump"
+    monkeypatch.setenv("REDACT_HOOK_DUMP_DIR", str(dump_dir))
+    stdin = io.StringIO("not json at all")
+    stderr = io.StringIO()
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "stderr", stderr):
+        code = run_hook(rules_dir)
+    assert code == 1
+    files = list(dump_dir.iterdir())
+    assert len(files) == 1
+    assert files[0].name.startswith("InvalidJSON-")
+    assert files[0].read_text() == "not json at all"
+
+
 def test_run_hook_invalid_json(rules_dir: Path) -> None:
     """Test run_hook handles invalid JSON input."""
     stdin = io.StringIO("not json")
@@ -703,7 +754,11 @@ rules:
 
 
 def test_post_tool_use_failure_ignores_legacy_tool_error_key(tmp_path: Path) -> None:
-    """Regression guard: only `error` is read, not the previous `tool_error` guess."""
+    """Regression guard: only `error` is read, not the previous `tool_error` guess.
+
+    The `tool_error` payload is also a perfect drift scenario: the canonical
+    `error` key is absent, so the schema-drift signal must fire.
+    """
     from redaction_hooks.audit import read_entries
     from redaction_hooks.hooks import handle_post_tool_use_failure
 
@@ -721,7 +776,13 @@ rules:
     }
     code, _ = capture_output(handle_post_tool_use_failure, data, tmp_path)
     assert code == 0
-    assert read_entries(tmp_path) == []
+    entries = read_entries(tmp_path)
+    # No real-rule entry (the secret is at the wrong key, so no aws-key audit).
+    assert not [e for e in entries if "aws-key" in e.get("rule_ids", [])]
+    # Drift signal fired because `error` was absent while rules were configured.
+    drift = [e for e in entries if e["action"] == "schema-drift"]
+    assert drift
+    assert drift[0]["rule_ids"] == ["missing-key:error"]
 
 
 def test_post_tool_use_failure_scans_input_too(tmp_path: Path) -> None:
@@ -768,6 +829,270 @@ rules:
     code, output = capture_output(handle_post_tool_use_failure, data, tmp_path)
     assert code == 0
     assert output == {"continue": True}
+    assert read_entries(tmp_path) == []
+
+
+def test_pre_tool_use_recursive_backstop_blocks_unknown_input_shape(tmp_path: Path) -> None:
+    """Phase 1 + 2(a): hypothetical future Bash payload renames `command` to `cmd`.
+
+    The per-tool extractor returns nothing, but the recursive walk catches the
+    secret -- block fires AND a schema-drift audit appears.
+    """
+    from redaction_hooks.audit import read_entries
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"cmd": "echo AKIAIOSFODNN7EXAMPLE"},  # NOT `command`
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+    assert output["continue"] is False
+    err = stderr.getvalue()
+    assert "schema-drift" in err
+    drift = [e for e in read_entries(tmp_path) if e["action"] == "schema-drift"]
+    assert drift
+    assert "aws-key" in drift[0]["rule_ids"]
+
+
+def test_pre_tool_use_recursive_backstop_skips_redact_on_unknown_shape(tmp_path: Path) -> None:
+    """Phase 1: redact rules cannot rewrite an unknown tool_input shape.
+
+    They are surfaced as redact-skipped (not silently ignored) so operators
+    notice and switch to block.
+    """
+    from redaction_hooks.audit import read_entries
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: email-redact
+    pattern: '[a-z]+@secret\\.com'
+    action: redact
+    replacement: email
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"cmd": "echo alice@secret.com"},
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, output = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True
+    err = stderr.getvalue()
+    assert "schema-drift" in err
+    assert "redact rules" in err
+    skipped = [e for e in read_entries(tmp_path) if e["action"] == "redact-skipped"]
+    assert skipped
+
+
+def test_pre_tool_use_no_drift_on_known_shape(tmp_path: Path) -> None:
+    """Phase 2(a): the recursive backstop must NOT fire when the per-tool
+    extractor already produced content. Otherwise every Bash call would
+    over-trigger drift on its own legitimate `command` field."""
+    from redaction_hooks.audit import read_entries
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo AKIAIOSFODNN7EXAMPLE"},
+    }
+    capture_output(handle_pre_tool_use, data, tmp_path)
+    drift = [e for e in read_entries(tmp_path) if e["action"] == "schema-drift"]
+    assert drift == []
+
+
+def test_post_tool_use_recursive_walk_emits_drift(tmp_path: Path) -> None:
+    """Phase 2(a): if PostToolUse only catches a secret via the recursive walk
+    over an unknown dict shape, a schema-drift audit must fire."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    # mcp__custom__weird_tool falls through the named-fields list; recursive
+    # fallback then catches the leak.
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "mcp__custom__weird_tool",
+        "tool_response": {"data": {"nested": "leak: AKIAIOSFODNN7EXAMPLE"}},
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, _ = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 2  # block still fires
+    assert "schema-drift" in stderr.getvalue()
+    drift = [e for e in read_entries(tmp_path) if e["action"] == "schema-drift"]
+    assert drift
+    assert "aws-key" in drift[0]["rule_ids"]
+
+
+def test_post_tool_use_no_drift_on_known_field(tmp_path: Path) -> None:
+    """Phase 2(a): drift signal must NOT fire when the named field caught the match."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_response": {"stdout": "AKIAIOSFODNN7EXAMPLE"},
+    }
+    capture_output(handle_post_tool_use, data, tmp_path)
+    drift = [e for e in read_entries(tmp_path) if e["action"] == "schema-drift"]
+    assert drift == []
+
+
+def test_pre_compact_drift_when_transcript_path_missing(tmp_path: Path) -> None:
+    """Phase 2(b): PreCompact without transcript_path emits drift if llm rules exist."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_pre_compact
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {"hook_event_name": "PreCompact", "trigger": "auto"}  # no transcript_path
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, _ = capture_output(handle_pre_compact, data, tmp_path)
+    assert code == 0  # PreCompact still allows
+    assert "schema-drift" in stderr.getvalue()
+    drift = [e for e in read_entries(tmp_path) if e["action"] == "schema-drift"]
+    assert drift
+    assert drift[0]["rule_ids"] == ["missing-key:transcript_path"]
+
+
+def test_post_compact_drift_when_transcript_path_missing(tmp_path: Path) -> None:
+    """Phase 2(b): PostCompact -- same pattern."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_post_compact
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {"hook_event_name": "PostCompact", "trigger": "manual"}
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, _ = capture_output(handle_post_compact, data, tmp_path)
+    assert code == 0
+    drift = [e for e in read_entries(tmp_path) if e["action"] == "schema-drift"]
+    assert drift
+    assert drift[0]["hook"] == "PostCompact"
+
+
+def test_stop_drift_when_transcript_path_missing(tmp_path: Path) -> None:
+    """Phase 2(b): Stop / SubagentStop -- same pattern, with hook label preserved."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_stop
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    for event in ("Stop", "SubagentStop"):
+        # fresh tmp via project_dir to avoid cross-iteration audit pollution
+        sub = tmp_path / event
+        sub.mkdir()
+        (sub / ".redaction_rules").write_text((tmp_path / ".redaction_rules").read_text())
+        data = {"hook_event_name": event}
+        capture_output(handle_stop, data, sub)
+        drift = [e for e in read_entries(sub) if e["action"] == "schema-drift"]
+        assert drift
+        assert drift[0]["hook"] == event
+
+
+def test_instructions_loaded_drift_when_file_path_missing(tmp_path: Path) -> None:
+    """Phase 2(b): InstructionsLoaded -- same pattern."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_instructions_loaded
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {"hook_event_name": "InstructionsLoaded", "memory_type": "Project"}
+    capture_output(handle_instructions_loaded, data, tmp_path)
+    drift = [e for e in read_entries(tmp_path) if e["action"] == "schema-drift"]
+    assert drift
+    assert drift[0]["rule_ids"] == ["missing-key:file_path"]
+
+
+def test_user_prompt_submit_drift_when_prompt_missing(tmp_path: Path) -> None:
+    """Phase 2(b): UserPromptSubmit -- empty `prompt` while other keys present
+    is treated as drift (a real prompt-less invocation has nothing else either).
+    """
+    from redaction_hooks.audit import read_entries
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    target: llm
+    action: block
+""")
+    data = {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "abc123",
+        "transcript_path": "/tmp/x.jsonl",
+        # no prompt key at all
+    }
+    capture_output(handle_user_prompt_submit, data, tmp_path)
+    drift = [e for e in read_entries(tmp_path) if e["action"] == "schema-drift"]
+    assert drift
+    assert drift[0]["rule_ids"] == ["missing-key:prompt"]
+
+
+def test_user_prompt_submit_no_drift_on_truly_empty_payload(tmp_path: Path) -> None:
+    """A bare payload (only hook_event_name, no other keys) is NOT drift --
+    it's an interactive invocation with no prompt yet, common in some flows."""
+    from redaction_hooks.audit import read_entries
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    target: llm
+    action: block
+""")
+    data = {"hook_event_name": "UserPromptSubmit"}
+    capture_output(handle_user_prompt_submit, data, tmp_path)
     assert read_entries(tmp_path) == []
 
 

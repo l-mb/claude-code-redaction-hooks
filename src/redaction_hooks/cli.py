@@ -262,6 +262,20 @@ def cmd_audit_prune(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify_cc_schema(args: argparse.Namespace) -> int:
+    """Drive `claude -p` headlessly, capture every hook payload via
+    REDACT_HOOK_DUMP_DIR, diff against the committed corpus, write reports.
+    """
+    from .verify_schema import run as run_verify
+
+    return run_verify(
+        report_dir=Path(args.report_dir),
+        keep_tmp=args.keep_tmp,
+        update_golden_flag=args.update_golden,
+        claude_bin=args.claude,
+    )
+
+
 REDACT_HOOK_COMMAND = "redact hook"
 # All entries fire for every tool (no `matcher`). The previous explicit lists
 # missed Read, MultiEdit, WebSearch, Task/Agent, and MCP `mcp__*__*` tools,
@@ -481,6 +495,26 @@ def main() -> int | NoReturn:
         "--global", dest="glob", action="store_true", help="Prune the global audit log"
     )
 
+    # verify-cc-schema subcommand
+    verify_parser = subparsers.add_parser(
+        "verify-cc-schema",
+        help="Drive `claude -p` headlessly, capture hook payloads, diff against corpus",
+    )
+    verify_parser.add_argument(
+        "--report-dir", default="./verify-report", help="Where to write report.json + report.md"
+    )
+    verify_parser.add_argument(
+        "--keep-tmp", action="store_true", help="Keep the harness tmp project for inspection"
+    )
+    verify_parser.add_argument(
+        "--update-golden",
+        action="store_true",
+        help="Refresh tests/fixtures/cc-payloads/ from this run's captures",
+    )
+    verify_parser.add_argument(
+        "--claude", default="claude", help="Path to the claude binary (default: claude)"
+    )
+
     args = parser.parse_args()
 
     if args.command == "hook":
@@ -505,6 +539,8 @@ def main() -> int | NoReturn:
             return cmd_audit_since(args)
         if args.audit_command == "prune":
             return cmd_audit_prune(args)
+    if args.command == "verify-cc-schema":
+        return cmd_verify_cc_schema(args)
 
     parser.print_help()
     return 1

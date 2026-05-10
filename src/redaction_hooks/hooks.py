@@ -71,6 +71,58 @@ def _audit_timeouts(
         )
 
 
+def _audit_schema_drift_stale_extractor(
+    hook: str,
+    matches: list[Match],
+    *,
+    tool: str | None = None,
+    tool_use_id: str | None = None,
+    project_dir: Path | None = None,
+) -> None:
+    """Drift signal: per-tool extractor returned nothing but a recursive walk
+    over the payload still found a rule match. The CC payload shape for this
+    tool may have moved underneath us. Surfaces in audit + stderr; query with
+    `redact audit since 30d | jq 'select(.action=="schema-drift")'`.
+    """
+    if not matches:
+        return
+    rule_ids = sorted({m.rule.id for m in matches})
+    log_event(
+        hook=hook,
+        action="schema-drift",
+        rule_ids=rule_ids,
+        tool=tool,
+        tool_use_id=tool_use_id,
+        project_dir=project_dir,
+    )
+    sys.stderr.write(
+        f"schema-drift: {hook}/{tool or '<n/a>'} matched only via recursive walk "
+        f"(rules {rule_ids}); per-tool extractor may be stale\n"
+    )
+
+
+def _audit_schema_drift_missing_key(
+    hook: str,
+    key: str,
+    *,
+    project_dir: Path | None = None,
+) -> None:
+    """Drift signal: a handler couldn't proceed because a required top-level
+    input key was missing/empty, even though configured rules WOULD have fired
+    if it had been present. Uses a synthetic rule_id `missing-key:<key>` so
+    operators can grep/filter cleanly.
+    """
+    sys.stderr.write(
+        f"schema-drift: {hook} received payload missing required key '{key}'; handler skipped\n"
+    )
+    log_event(
+        hook=hook,
+        action="schema-drift",
+        rule_ids=[f"missing-key:{key}"],
+        project_dir=project_dir,
+    )
+
+
 # Regex to identify path-like tokens in shell commands (starts with ~, ., or /)
 _PATH_PATTERN = re.compile(r"^[~./]")
 _URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
@@ -524,6 +576,46 @@ def handle_pre_tool_use(data: dict[str, Any], project_dir: Path | None = None) -
             all_matches.extend(content_matcher.scan(content, "tool", tool_name))
             timeouts.extend(content_matcher.last_timeouts)
 
+    # Phase 1 backstop: per-tool extractor returned nothing -- maybe CC's
+    # tool_input shape moved underneath us. Walk every string leaf in
+    # tool_input against content_only rules. Block-action matches still fire;
+    # redact gets skipped (we cannot reliably write back to an unknown shape).
+    # Only content-pattern rules apply here -- combined rules need their path
+    # constraint, which we cannot enforce on a recursive walk over raw strings.
+    recursive_matches: list[Match] = []
+    if not content and not paths and content_only_rules and tool_input:
+        walk_matcher = PatternMatcher(content_only_rules)
+        for s in _walk_strings(tool_input):
+            if s:
+                recursive_matches.extend(walk_matcher.scan(s, "tool", tool_name))
+        timeouts.extend(walk_matcher.last_timeouts)
+    if recursive_matches:
+        _audit_schema_drift_stale_extractor(
+            "PreToolUse",
+            recursive_matches,
+            tool=tool_name,
+            tool_use_id=tool_use_id,
+            project_dir=project_dir,
+        )
+        redact_recursive = [m for m in recursive_matches if m.rule.action == "redact"]
+        non_redact_recursive = [m for m in recursive_matches if m.rule.action != "redact"]
+        all_matches.extend(non_redact_recursive)
+        if redact_recursive:
+            rsk_ids = sorted({m.rule.id for m in redact_recursive})
+            sys.stderr.write(
+                f"Warning: redact rules {rsk_ids} matched only in recursive walk of "
+                f"PreToolUse/{tool_name} tool_input; cannot rewrite unknown shape -- "
+                "consider switching to block\n"
+            )
+            log_event(
+                hook="PreToolUse",
+                action="redact-skipped",
+                rule_ids=rsk_ids,
+                tool=tool_name,
+                tool_use_id=tool_use_id,
+                project_dir=project_dir,
+            )
+
     # Check file_content_pattern rules (reads actual file content)
     file_content_rules = [r for r in rules if r.file_content_pattern]
     if paths and file_content_rules:
@@ -618,6 +710,12 @@ def handle_user_prompt_submit(data: dict[str, Any], project_dir: Path | None = N
     """Handle UserPromptSubmit hook event."""
     prompt = data.get("prompt", "")
     if not prompt:
+        # Phase 2(b): if other payload keys exist and llm rules are configured,
+        # the missing prompt key is a drift signal -- not a no-op session.
+        rules = load_rules(project_dir)
+        llm_rules = [r for r in rules if r.target in ("llm", "both")]
+        if llm_rules and any(k for k in data if k != "hook_event_name"):
+            _audit_schema_drift_missing_key("UserPromptSubmit", "prompt", project_dir=project_dir)
         json.dump({"continue": True}, sys.stdout)
         return 0
 
@@ -720,12 +818,15 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
     skipped_redact: list[Match] = []
     skipped_labels: list[str] = []
     timeouts: list[str] = []
+    field_match_count = 0  # for Phase 2(a) drift detection
+    recursive_matches: list[Match] = []
 
     for field_path, content in fields:
         matches = matcher.scan(content, "tool", tool_name)
         timeouts.extend(matcher.last_timeouts)
         if not matches:
             continue
+        field_match_count += len(matches)
         all_matches.extend(matches)
         writable_redact.extend(m for m in matches if m.rule.action == "redact")
         result = apply_actions(content, matches, project_dir)
@@ -740,6 +841,8 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
         if not matches:
             continue
         all_matches.extend(matches)
+        if label == "<recursive>":
+            recursive_matches.extend(matches)
         result = apply_actions(content, matches, project_dir)
         block_reasons.extend(result.block_reasons)
         warn_reasons.extend(result.warn_reasons)
@@ -747,6 +850,18 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
         if rmatches:
             skipped_redact.extend(rmatches)
             skipped_labels.append(label)
+
+    # Phase 2(a): the recursive fallback caught matches that the per-tool
+    # field list missed. Emit schema-drift so the operator knows the per-tool
+    # extractor has gone stale (or this is a brand-new tool we haven't named).
+    if recursive_matches and field_match_count == 0:
+        _audit_schema_drift_stale_extractor(
+            "PostToolUse",
+            recursive_matches,
+            tool=tool_name,
+            tool_use_id=tool_use_id,
+            project_dir=project_dir,
+        )
 
     _audit_timeouts(
         "PostToolUse",
@@ -872,6 +987,11 @@ def handle_post_tool_use_failure(data: dict[str, Any], project_dir: Path | None 
         json.dump({"continue": True}, sys.stdout)
         return 0
 
+    # Phase 2(b): if `error` is absent (vs explicitly empty), CC may have
+    # renamed the field. Emit drift if rules exist that COULD have fired.
+    if "error" not in data and rules:
+        _audit_schema_drift_missing_key("PostToolUseFailure", "error", project_dir=project_dir)
+
     matcher = PatternMatcher(rules)
     all_matches: list[Match] = []
     timeouts: list[str] = []
@@ -942,6 +1062,13 @@ def handle_instructions_loaded(data: dict[str, Any], project_dir: Path | None = 
     load_reason = data.get("load_reason", "unknown")
 
     if not file_path:
+        # Phase 2(b): the entry-point key went missing.
+        rules = load_rules(project_dir)
+        llm_rules = [r for r in rules if r.target in ("llm", "both")]
+        if llm_rules:
+            _audit_schema_drift_missing_key(
+                "InstructionsLoaded", "file_path", project_dir=project_dir
+            )
         json.dump({"continue": True}, sys.stdout)
         return 0
 
@@ -1027,6 +1154,11 @@ def handle_stop(data: dict[str, Any], project_dir: Path | None = None) -> int:
     transcript_path = data.get("transcript_path", "")
     hook_event = data.get("hook_event_name", "Stop")
     if not transcript_path:
+        # Phase 2(b): Stop / SubagentStop need transcript_path to do anything.
+        rules = load_rules(project_dir)
+        llm_rules = [r for r in rules if r.target in ("llm", "both")]
+        if llm_rules:
+            _audit_schema_drift_missing_key(hook_event, "transcript_path", project_dir=project_dir)
         json.dump({"continue": True}, sys.stdout)
         return 0
 
@@ -1110,6 +1242,13 @@ def handle_pre_compact(data: dict[str, Any], project_dir: Path | None = None) ->
     trigger = data.get("trigger", "unknown")
 
     if not transcript_path:
+        # Phase 2(b)
+        rules = load_rules(project_dir)
+        llm_rules = [r for r in rules if r.target in ("llm", "both")]
+        if llm_rules:
+            _audit_schema_drift_missing_key(
+                "PreCompact", "transcript_path", project_dir=project_dir
+            )
         json.dump({"continue": True}, sys.stdout)
         return 0
 
@@ -1171,6 +1310,13 @@ def handle_post_compact(data: dict[str, Any], project_dir: Path | None = None) -
     trigger = data.get("trigger", "unknown")
 
     if not transcript_path:
+        # Phase 2(b)
+        rules = load_rules(project_dir)
+        llm_rules = [r for r in rules if r.target in ("llm", "both")]
+        if llm_rules:
+            _audit_schema_drift_missing_key(
+                "PostCompact", "transcript_path", project_dir=project_dir
+            )
         json.dump({"continue": True}, sys.stdout)
         return 0
 
@@ -1199,15 +1345,43 @@ def handle_post_compact(data: dict[str, Any], project_dir: Path | None = None) -
     return 0
 
 
-def run_hook(project_dir: Path | None = None) -> int:
-    """Main hook entry point. Reads JSON from stdin, dispatches to handler."""
+def _maybe_dump_payload(raw: str, event: str) -> None:
+    """If `$REDACT_HOOK_DUMP_DIR` points at a writable dir, dump the raw stdin
+    payload to `<dir>/<event>-<nanos>-<pid>.json`. Best-effort: failures are
+    swallowed so debug instrumentation never breaks the hook itself.
+    """
+    import os
+    import time
+
+    dump_dir = os.environ.get("REDACT_HOOK_DUMP_DIR")
+    if not dump_dir:
+        return
     try:
-        data = json.load(sys.stdin)
+        target = Path(dump_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        name = f"{event or 'Unknown'}-{time.time_ns()}-{os.getpid()}.json"
+        (target / name).write_text(raw, encoding="utf-8")
+    except OSError as e:
+        sys.stderr.write(f"redaction_hooks: REDACT_HOOK_DUMP_DIR write failed: {e}\n")
+
+
+def run_hook(project_dir: Path | None = None) -> int:
+    """Main hook entry point. Reads JSON from stdin, dispatches to handler.
+
+    When `$REDACT_HOOK_DUMP_DIR` is set, the raw stdin payload is also written
+    to that directory before being parsed -- a no-cost diagnostic primitive used
+    by `redact verify-cc-schema` and ad-hoc payload inspection.
+    """
+    raw = sys.stdin.read()
+    try:
+        data = json.loads(raw)
     except json.JSONDecodeError as e:
         sys.stderr.write(f"Invalid JSON input: {e}\n")
+        _maybe_dump_payload(raw, "InvalidJSON")
         return 1
 
     event = data.get("hook_event_name", "")
+    _maybe_dump_payload(raw, event)
 
     if event == "PreToolUse":
         return handle_pre_tool_use(data, project_dir)

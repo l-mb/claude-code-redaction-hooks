@@ -143,6 +143,29 @@ A regex configured via `hash_extractor` extracts candidate segments from input, 
 echo "SecretProjectName" | redact secret add --id project-name
 ```
 
+## Verifying CC compatibility
+
+Claude Code's hook payload schema is undocumented in detail and drifts between releases. Two defenses ship in-tree:
+
+- **Runtime drift signal.** Every handler audits a `schema-drift` entry (and writes one stderr line) when (a) a match was caught only by the recursive backstop instead of the per-tool extractor, or (b) a required top-level input key (e.g. `transcript_path`, `file_path`, `error`) is missing from the payload. Operators surface them with `redact audit since 7d | jq 'select(.action=="schema-drift")'`.
+- **Live verification harness.** `redact verify-cc-schema` invokes `claude -p` headlessly through scripted scenarios (Bash success, Bash failure, Read, Grep, subagent), captures every hook payload via `REDACT_HOOK_DUMP_DIR`, runs the extractors against each, and diffs the top-level keys against the committed corpus in `tests/fixtures/cc-payloads/`.
+
+```bash
+redact verify-cc-schema --report-dir ./verify-out
+# → verify-out/report.json  (machine-parseable; feed back to Claude for analysis)
+# → verify-out/report.md    (human summary; "Drift detected" section if any)
+# Exit 0 = no drift, 1 = drift detected, 2 = harness error (e.g. claude not on PATH).
+```
+
+If the report flags drift you can either:
+
+- File an upstream bug or wait for confirmation, OR
+- Update the corpus + extractor: `redact verify-cc-schema --update-golden` regenerates `tests/fixtures/cc-payloads/*.json` from the live captures (anonymised). Review the diff, update `_iter_output_fields` / `_get_tool_input_*` in `src/redaction_hooks/hooks.py` if a field name moved, then run `uv run pytest tests/test_extractor_fixtures.py` to confirm extractors recognise the new shape.
+
+The harness needs `claude` on `PATH` and a working CC API session. Default scenarios use ~5 short turns; expect the run to consume modest API quota each time.
+
+For ad-hoc payload inspection without the full harness: `REDACT_HOOK_DUMP_DIR=/tmp/cc-dump` causes `redact hook` to dump the raw stdin payload before processing it, so any installed CC session populates the directory automatically.
+
 ## 0.2.0 release notes
 
 - **Behaviour fix**: PreToolUse and PostToolUse hooks no longer ship with a hard-coded tool matcher. Earlier versions installed `matcher: "Write|Edit|Bash"` (PreToolUse) and `matcher: "Read|Bash|Grep|Glob|WebFetch"` (PostToolUse), which silently bypassed `Read`, `MultiEdit`, `WebSearch`, `Task`/Agent, and MCP `mcp__*__*` tools. Rules with `tool: Read` or `file_tools: read` now fire as the README has always documented. Re-run `redact claude-setup` (or `--uninstall && claude-setup`) to refresh existing installs.

@@ -1,0 +1,21 @@
+{
+  "session_id": "<SESSION>",
+  "transcript_path": "<HOME>/.claude/projects/-<PROJECT>/<SESSION>.jsonl",
+  "cwd": "<HOME>/<PROJECT>",
+  "permission_mode": "auto",
+  "effort": {"level": "high"},
+  "hook_event_name": "PostToolUse",
+  "tool_name": "REPL",
+  "tool_input": {
+    "code": "1 + 1",
+    "description": "Trivial REPL eval"
+  },
+  "tool_response": {
+    "code": "1 + 1",
+    "result": "2",
+    "stdout": "",
+    "stderr": ""
+  },
+  "tool_use_id": "<TOOL_USE>",
+  "duration_ms": 4
+}
