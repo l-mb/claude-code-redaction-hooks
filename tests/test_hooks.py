@@ -2610,6 +2610,88 @@ def test_bash_paths_falls_back_on_unbalanced_quotes(tmp_path: Path) -> None:
     assert any("/etc/passwd" in p for p in paths)
 
 
+# Tests for shell-c recursion: paths inside `<shell> -c "<inner>"` must be
+# extracted from the inner command, not left as a single opaque token.
+
+
+def test_bash_paths_recurses_into_bash_c() -> None:
+    """`bash -c "cat /etc/passwd"` exposes /etc/passwd to path-pattern rules."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    assert "/etc/passwd" in _extract_bash_paths('bash -c "cat /etc/passwd"')
+
+
+def test_bash_paths_recurses_into_sh_c_single_quoted() -> None:
+    """`sh -c '...'` is recursed identically to bash -c."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    assert "/etc/passwd" in _extract_bash_paths("sh -c 'cat /etc/passwd'")
+
+
+def test_bash_paths_recurses_with_absolute_shell_path() -> None:
+    """Recursion matches the basename, so /usr/bin/bash works too."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    assert "/tmp/x" in _extract_bash_paths('/usr/bin/bash -c "cat /tmp/x"')
+
+
+def test_bash_paths_inner_with_no_paths_is_empty() -> None:
+    """An inner command with no path tokens contributes nothing."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    assert _extract_bash_paths('bash -c "echo hi"') == []
+
+
+def test_bash_paths_inner_with_multiple_path_args() -> None:
+    """An inner command with several path tokens surfaces every one of them.
+
+    (Compound-command separators inside the quoted string are a separate
+    pre-existing limitation: _SHELL_SEPARATORS isn't quote-aware, so `&&` /
+    `;` / `|` *inside* quotes still split the outer string and break the
+    `<shell> -c <inner>` token boundary. Tested here with a single-command
+    inner that exercises just the recursion.)
+    """
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    paths = _extract_bash_paths('bash -c "cp /etc/passwd /tmp/leak"')
+    assert "/etc/passwd" in paths
+    assert "/tmp/leak" in paths
+
+
+def test_bash_paths_strips_leading_env_assignments() -> None:
+    """`env`-style `VAR=value <shell> -c <inner>` still recognises the shell."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    assert "/etc/passwd" in _extract_bash_paths('FOO=1 bash -c "cat /etc/passwd"')
+
+
+def test_bash_paths_recurses_into_dash_c_equals_form() -> None:
+    """`-c=<inner>` is accepted alongside the conventional `-c <inner>`."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    assert "/etc/passwd" in _extract_bash_paths('bash -c="cat /etc/passwd"')
+
+
+def test_bash_paths_handles_nested_shell_recursion() -> None:
+    """`bash -c "bash -c '...'"` recurses to whatever depth the input nests."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    assert "/etc/passwd" in _extract_bash_paths("""bash -c "bash -c 'cat /etc/passwd'" """)
+
+
+def test_bash_paths_non_shell_binary_no_recursion() -> None:
+    """A leading binary that isn't a known shell does not trigger recursion;
+    the outer tokens are still scanned by _extract_path_from_token."""
+    from redaction_hooks.hooks import _extract_bash_paths
+
+    paths = _extract_bash_paths("notashell -c 'cat /etc/passwd'")
+    # The inner `cat /etc/passwd` is opaque to the outer tokenizer, so the
+    # entire string lands as one token (which still contains `/`, so it ends
+    # up returned). The point of this test is that no recursion happens --
+    # we get the un-split token, not the cleanly-extracted /etc/passwd.
+    assert "/etc/passwd" not in paths
+
+
 # Tests for PathMatcher resolve-warning
 
 

@@ -131,6 +131,12 @@ _FALLBACK_PATH_RE = re.compile(r"(?:^|[\s;|&])([~/][^\s;|&]+|\.\.?/[^\s;|&]+)")
 # Splits a compound shell command on ; && || | newline so each subcommand
 # can be tokenized independently
 _SHELL_SEPARATORS = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
+# Shell binaries whose `-c <inner>` argument should be recursively re-tokenized.
+# Without this, a path inside `bash -c "cat /etc/passwd"` arrives as the single
+# shlex token `cat /etc/passwd`, which fnmatch then fails to match against
+# `/etc/passwd` -- silently bypassing path-pattern rules. Matched on basename
+# so `/usr/bin/bash` and `bash` are both recognised.
+_SHELL_BINARIES = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
 
 # Tools that operate on files for file_tools filtering
 _READ_TOOLS = {"Read"}
@@ -158,6 +164,28 @@ def _extract_path_from_token(token: str) -> str | None:
     return None
 
 
+def _shell_inner_command(tokens: list[str]) -> str | None:
+    """If `tokens` is a `<shell> -c <inner>` invocation, return `<inner>`.
+
+    Strips leading `VAR=value` assignments (e.g. `env FOO=1 bash -c ...`) and
+    accepts both `-c <inner>` and `-c=<inner>`. Returns None if the leading
+    binary is not a known shell or no `-c` argument is present.
+    """
+    i = 0
+    while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith(("-", "/")):
+        i += 1  # leading env-style VAR=value assignment
+    if i >= len(tokens):
+        return None
+    if Path(tokens[i]).name not in _SHELL_BINARIES:
+        return None
+    for j in range(i + 1, len(tokens)):
+        if tokens[j] == "-c" and j + 1 < len(tokens):
+            return tokens[j + 1]
+        if tokens[j].startswith("-c="):
+            return tokens[j][3:]
+    return None
+
+
 def _extract_bash_paths(command: str) -> list[str]:
     """Extract path-like tokens from a shell command.
 
@@ -165,6 +193,8 @@ def _extract_bash_paths(command: str) -> list[str]:
     subcommand is tokenized independently. A token is a path if it starts with
     `/`, `./`, `../`, or `~`, or if it contains `/` and is not a flag.
     `--key=value` tokens contribute `value` (not the whole `--key=value`).
+    Wrapped shells (`bash -c "<inner>"`, `sh -c '<inner>'`, etc.) are recursed
+    into so paths inside the wrapped command are not missed.
     """
     import shlex
 
@@ -178,6 +208,9 @@ def _extract_bash_paths(command: str) -> list[str]:
             # Unclosed quotes etc -- fall back to a regex sweep over the original
             paths.extend(m.group(1) for m in _FALLBACK_PATH_RE.finditer(subcommand))
             continue
+        inner = _shell_inner_command(tokens)
+        if inner is not None:
+            paths.extend(_extract_bash_paths(inner))
         for token in tokens:
             extracted = _extract_path_from_token(token)
             if extracted is not None:
