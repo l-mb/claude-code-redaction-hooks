@@ -14,4 +14,9 @@
 
 """Claude Code redaction hooks for preventing secrets and PII leakage."""
 
-__version__ = "0.2.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("claude-code-redaction-hooks")
+except PackageNotFoundError:  # not installed (e.g. running from a sdist tarball)
+    __version__ = "0.0.0+unknown"
