@@ -146,13 +146,31 @@ rules:
 
 ### Hashed secrets
 
-To allow the filter list to be safely committed alongside the source code, secrets can be hashed with SHA-256.
+Secrets can be hashed with SHA-256 so the rules file is less revealing if it leaks.
 
 A regex configured via `hash_extractor` extracts candidate segments from input, hashes each, and compares against the rule's `pattern` to decide block/redact.
 
 ```bash
 echo "SecretProjectName" | redact secret add --id project-name
 ```
+
+> **Threat model.** SHA-256 hashing protects the rules file from casual
+> inspection only. With the default `hash_extractor: \b\w{4,}\b` an
+> attacker with the rules file can hash every dictionary word and try
+> common passphrases offline — a short codename, an English passphrase,
+> or a personal name will not survive the brute force. Hashed rules are
+> appropriate for one of:
+>
+> - **strong secrets with significant entropy** (random tokens, generated
+>   API keys), where exhaustive search is infeasible; or
+> - **secrets that shouldn't be committed to the repo at all** — keep
+>   those in a `--global` rules file under `~/.claude/`, or load them at
+>   runtime from a vault.
+>
+> Choosing a tighter `hash_extractor` (e.g. `\b[A-Za-z0-9_-]{16,}\b`)
+> raises the bar somewhat by limiting what segments the matcher even
+> tries to hash, but it does not change the underlying offline-search
+> threat for low-entropy inputs.
 
 ## Verifying CC compatibility
 
