@@ -195,6 +195,39 @@ The harness needs `claude` on `PATH` and a working CC API session. Default scena
 
 For ad-hoc payload inspection without the full harness: `REDACT_HOOK_DUMP_DIR=/tmp/cc-dump` causes `redact hook` to dump the raw stdin payload before processing it, so any installed CC session populates the directory automatically.
 
+## 0.3.0 release notes
+
+- **Behaviour fix**: every handler that detects a `redact`-action match but
+  cannot rewrite the payload now audits as `redact-skipped` (matching the
+  README contract). Affects `UserPromptSubmit`, `PostToolUse` (non-dict /
+  no-change branches), `PostToolUseFailure`, `PreCompact`, `PostCompact`,
+  `InstructionsLoaded`, `Stop`, `SubagentStop`. The `PostToolUse` success
+  path that produces a real `updatedToolOutput` still audits as `redact`.
+  Operator queries against `redact audit since 7d | jq 'select(.action=="redact")'`
+  now reliably reflect "rewrite happened" rather than "rule matched somewhere".
+- **Security fix**: `path_pattern` rules for `Bash` now see paths inside
+  `bash -c "<inner>"` / `sh -c '<inner>'` / `dash`/`zsh`/`ksh` wrappers
+  (incl. `env VAR=x bash -c …` and `-c=<inner>` forms). Previously the
+  inner command landed as a single shlex token and silently bypassed the
+  matcher.
+- **CLI**: `redact secret add` now exposes `--action {block,redact,warn}`,
+  `--target {llm,tool,both}`, `--hash-extractor REGEX`, and `--replacement
+  STR`. Hashed redact-style rules no longer require hand-editing.
+- **CLI**: `redact hook` defaults to `Path.cwd()` when `$CLAUDE_PROJECT_DIR`
+  is unset (previously fell back to the user-global audit log, which
+  `redact audit tail` doesn't read by default). Manual hook invocations
+  from a project shell now show up in `redact audit tail` as expected.
+- **Docs**: README documents the threat model for hashed rules
+  (brute-forceable for low-entropy inputs) and warns that `redact secret
+  add` re-serialises the rules file via `yaml.dump` (drops comments).
+- **Internal**: `hooks.py` (1530 lines) split into a `handlers/` package
+  plus `extractors.py` and `drift.py`. `handle_pre_tool_use` (was CCN 59)
+  and `iter_output_fields` (was CCN 42) are decomposed; no behaviour
+  change. Test imports updated; the public API reachable via
+  `redaction_hooks.run_hook` is unchanged.
+- `__version__` is now sourced from `importlib.metadata` so `pyproject.toml`
+  is the single source of truth.
+
 ## 0.2.0 release notes
 
 - **Behaviour fix**: PreToolUse and PostToolUse hooks no longer ship with a hard-coded tool matcher. Earlier versions installed `matcher: "Write|Edit|Bash"` (PreToolUse) and `matcher: "Read|Bash|Grep|Glob|WebFetch"` (PostToolUse), which silently bypassed `Read`, `MultiEdit`, `WebSearch`, `Task`/Agent, and MCP `mcp__*__*` tools. Rules with `tool: Read` or `file_tools: read` now fire as the README has always documented. Re-run `redact claude-setup` (or `--uninstall && claude-setup`) to refresh existing installs.
