@@ -96,6 +96,45 @@ def test_classify_payload_diffs_top_level_keys_against_golden() -> None:
     assert "duration_ms" in cap.drift["missing_top_level_keys_vs_corpus"]
 
 
+def test_classify_payload_does_not_flag_drift_for_non_extractor_events() -> None:
+    """InstructionsLoaded / UserPromptSubmit / Stop / *Compact handlers don't
+    use the per-tool extractors. The classifier must NOT flag them as drift
+    just for having no extractor output -- it should check their event-specific
+    entry-point keys instead."""
+    cases = [
+        {"hook_event_name": "InstructionsLoaded", "file_path": "/x"},
+        {"hook_event_name": "UserPromptSubmit", "prompt": "hi"},
+        {"hook_event_name": "PreCompact", "transcript_path": "/x"},
+        {"hook_event_name": "PostCompact", "transcript_path": "/x"},
+        {"hook_event_name": "Stop", "last_assistant_message": "DONE"},
+        {"hook_event_name": "Stop", "transcript_path": "/x"},
+        {
+            "hook_event_name": "SubagentStop",
+            "agent_transcript_path": "/x",
+            "transcript_path": "/y",
+        },
+    ]
+    for payload in cases:
+        cap = classify_payload(payload, "fake.json", golden={})
+        assert cap.drift["extractor_returned_nothing"] is False, (
+            f"false-positive drift for {payload['hook_event_name']}: {cap.drift!r}"
+        )
+
+
+def test_classify_payload_flags_drift_when_required_keys_all_missing() -> None:
+    """A non-extractor event with NONE of its entry-point keys present IS drift."""
+    cases = [
+        ({"hook_event_name": "InstructionsLoaded"}, ()),  # no file_path
+        ({"hook_event_name": "UserPromptSubmit"}, ()),  # no prompt
+        ({"hook_event_name": "Stop"}, ()),  # neither last_assistant_message nor transcript_path
+    ]
+    for payload, _ in cases:
+        cap = classify_payload(payload, "fake.json", golden={})
+        assert cap.drift["extractor_returned_nothing"] is True, (
+            f"missed drift for {payload}: {cap.drift!r}"
+        )
+
+
 def test_anonymise_replaces_home_project_session_tooluse(tmp_path: Path) -> None:
     """The anonymiser replaces all four sensitive substrings, leaves structure intact."""
     home = str(Path.home())

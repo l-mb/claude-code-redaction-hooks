@@ -351,6 +351,142 @@ rules:
     assert updated["interrupted"] is False  # untouched fields preserved
 
 
+def test_post_tool_use_blocks_grep_filenames_list(tmp_path: Path) -> None:
+    """Real CC Grep response is `{filenames: [...], mode, numFiles}`. The named
+    extractor must catch a secret in any filename entry."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Grep",
+        "tool_input": {"pattern": "x", "path": "/tmp"},
+        "tool_response": {
+            "filenames": ["/tmp/clean", "/tmp/AKIAIOSFODNN7EXAMPLE.log"],
+            "mode": "files_with_matches",
+            "numFiles": 2,
+        },
+    }
+    code, _ = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 2
+
+
+def test_pre_tool_use_blocks_grep_pattern(tmp_path: Path) -> None:
+    """Grep tool_input has `{pattern, path}` -- our extractor scans `pattern`."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Grep",
+        "tool_input": {"pattern": "AKIAIOSFODNN7EXAMPLE", "path": "/tmp"},
+    }
+    code, _ = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+
+
+def test_pre_tool_use_blocks_agent_prompt(tmp_path: Path) -> None:
+    """Task / Agent tool_input has `{description, prompt, subagent_type}`.
+    A secret in the subagent prompt must block before delegation."""
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Agent",
+        "tool_input": {
+            "description": "Use this key",
+            "prompt": "AWS_KEY=AKIAIOSFODNN7EXAMPLE go fetch X",
+            "subagent_type": "general-purpose",
+        },
+    }
+    code, _ = capture_output(handle_pre_tool_use, data, tmp_path)
+    assert code == 2
+
+
+def test_post_tool_use_blocks_agent_content_list(tmp_path: Path) -> None:
+    """Agent tool_response.content is a list-of-message-dicts; we pull `.text`
+    from each entry."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Agent",
+        "tool_input": {"description": "x", "prompt": "y", "subagent_type": "general-purpose"},
+        "tool_response": {
+            "agentId": "a",
+            "agentType": "general-purpose",
+            "content": [{"type": "text", "text": "leak: AKIAIOSFODNN7EXAMPLE"}],
+            "status": "completed",
+        },
+    }
+    code, _ = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 2
+
+
+def test_post_tool_use_redacts_agent_content_list(tmp_path: Path) -> None:
+    """Redact rewrites the nested content[i].text leaf without mangling siblings."""
+    from redaction_hooks.hooks import handle_post_tool_use
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: email-redact
+    pattern: '[a-z]+@secret\\.com'
+    action: redact
+    replacement: email
+    target: tool
+""")
+    data = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Agent",
+        "tool_input": {"description": "x", "prompt": "y", "subagent_type": "general-purpose"},
+        "tool_response": {
+            "agentId": "a",
+            "agentType": "general-purpose",
+            "content": [
+                {"type": "text", "text": "contact: alice@secret.com"},
+                {"type": "text", "text": "second message clean"},
+            ],
+            "status": "completed",
+        },
+    }
+    code, output = capture_output(handle_post_tool_use, data, tmp_path)
+    assert code == 0
+    updated = output["hookSpecificOutput"]["updatedToolOutput"]
+    assert "alice@secret.com" not in updated["content"][0]["text"]
+    assert "@example.com" in updated["content"][0]["text"]
+    assert updated["content"][1]["text"] == "second message clean"
+    assert updated["agentId"] == "a"  # untouched siblings preserved
+
+
+def test_set_output_field_handles_combined_path() -> None:
+    """_set_output_field must walk `key[idx].subkey` paths used by Agent/Task."""
+    from redaction_hooks.hooks import _set_output_field
+
+    obj: dict[str, object] = {"content": [{"type": "text", "text": "old"}]}
+    _set_output_field(obj, "content[0].text", "new")
+    assert obj == {"content": [{"type": "text", "text": "new"}]}
+
+
 def test_post_tool_use_redacts_grep_matches_list(tmp_path: Path) -> None:
     """Test PostToolUse redacts each element of a Grep matches list independently."""
     from redaction_hooks.hooks import handle_post_tool_use
@@ -2151,6 +2287,78 @@ rules:
         code, _ = capture_output(handle_stop, data, tmp_path)
     assert code == 0
     assert "cannot read transcript" in stderr.getvalue()
+
+
+def test_stop_prefers_inline_last_assistant_message(tmp_path: Path) -> None:
+    """Real CC payload carries `last_assistant_message` directly. The handler
+    must read it without touching the transcript file."""
+    from redaction_hooks.hooks import handle_stop
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    # No transcript_path file on disk; handler should not need to read it.
+    data = {
+        "hook_event_name": "Stop",
+        "transcript_path": str(tmp_path / "does-not-exist.jsonl"),
+        "last_assistant_message": "leak: AKIAIOSFODNN7EXAMPLE",
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, _ = capture_output(handle_stop, data, tmp_path)
+    assert code == 0
+    assert "aws-key" in stderr.getvalue()
+
+
+def test_subagent_stop_prefers_agent_transcript_path(tmp_path: Path) -> None:
+    """SubagentStop has its own `agent_transcript_path`. When falling back
+    (no inline message), we walk THAT, not the parent transcript_path."""
+    from redaction_hooks.hooks import handle_stop
+
+    parent_transcript = tmp_path / "parent.jsonl"
+    _write_transcript(parent_transcript, {"type": "assistant", "content": "parent says hi"})
+    agent_transcript = tmp_path / "agent.jsonl"
+    _write_transcript(
+        agent_transcript,
+        {"type": "assistant", "content": "leak: AKIAIOSFODNN7EXAMPLE"},
+    )
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {
+        "hook_event_name": "SubagentStop",
+        "transcript_path": str(parent_transcript),
+        "agent_transcript_path": str(agent_transcript),
+    }
+    stderr = io.StringIO()
+    with patch.object(sys, "stderr", stderr):
+        code, _ = capture_output(handle_stop, data, tmp_path)
+    assert code == 0
+    assert "aws-key" in stderr.getvalue()
+
+
+def test_stop_drift_when_neither_inline_nor_transcript(tmp_path: Path) -> None:
+    """Both inline message AND transcript_path missing → schema-drift signal."""
+    from redaction_hooks.audit import read_entries
+    from redaction_hooks.hooks import handle_stop
+
+    (tmp_path / ".redaction_rules").write_text("""
+rules:
+  - id: aws-key
+    pattern: 'AKIA[0-9A-Z]{16}'
+    action: block
+""")
+    data = {"hook_event_name": "Stop"}  # no transcript, no inline message
+    capture_output(handle_stop, data, tmp_path)
+    drift = [e for e in read_entries(tmp_path) if e["action"] == "schema-drift"]
+    assert drift
+    assert "missing-key:last_assistant_message|transcript_path" in drift[0]["rule_ids"]
 
 
 def test_run_hook_dispatches_stop(tmp_path: Path) -> None:

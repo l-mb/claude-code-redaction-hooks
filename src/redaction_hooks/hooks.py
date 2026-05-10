@@ -186,13 +186,22 @@ def _extract_bash_paths(command: str) -> list[str]:
 
 
 def _get_tool_input_paths(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
-    """Extract file paths from tool input for path-based matching."""
+    """Extract file paths from tool input for path-based matching.
+
+    Per-tool keys verified against real CC 2.1.x payloads:
+      - Read / Write / Edit / MultiEdit: tool_input.file_path
+      - Bash: tool_input.command (parsed for path tokens)
+      - Grep / Glob: tool_input.path (the directory under search)
+    """
     if tool_name in ("Read", "Write", "Edit", "MultiEdit"):
         path = tool_input.get("file_path")
         return [path] if path else []
     if tool_name == "Bash":
         command = tool_input.get("command", "")
         return _extract_bash_paths(command)
+    if tool_name in ("Grep", "Glob"):
+        path = tool_input.get("path")
+        return [path] if path else []
     return []
 
 
@@ -247,13 +256,34 @@ def _file_tools_matches(file_tools: str | None, tool_name: str) -> bool:
 
 
 def _get_tool_input_content(tool_name: str, tool_input: dict[str, Any]) -> str | None:
-    """Extract content to scan from tool input based on tool type."""
+    """Extract content to scan from tool input based on tool type.
+
+    Per-tool keys verified against real CC 2.1.x payloads:
+      - Write / Edit / MultiEdit: content or new_string
+      - Bash: command
+      - Read: file_path
+      - Grep / Glob: pattern (the regex / glob expression itself)
+      - Task / Agent: description + prompt joined (subagent gets both)
+    """
     if tool_name in ("Write", "Edit", "MultiEdit"):
-        return tool_input.get("content") or tool_input.get("new_string")
+        content = tool_input.get("content") or tool_input.get("new_string")
+        return content if isinstance(content, str) else None
     if tool_name == "Bash":
-        return tool_input.get("command")
+        command = tool_input.get("command")
+        return command if isinstance(command, str) else None
     if tool_name == "Read":
-        return tool_input.get("file_path")
+        file_path = tool_input.get("file_path")
+        return file_path if isinstance(file_path, str) else None
+    if tool_name in ("Grep", "Glob"):
+        pattern = tool_input.get("pattern")
+        return pattern if isinstance(pattern, str) else None
+    if tool_name in ("Task", "Agent"):
+        parts: list[str] = []
+        for k in ("description", "prompt"):
+            v = tool_input.get(k)
+            if isinstance(v, str) and v:
+                parts.append(v)
+        return "\n".join(parts) if parts else None
     return None
 
 
@@ -272,13 +302,17 @@ def _iter_output_fields(tool_name: str, tool_response: Any) -> list[tuple[str, s
 
     Each field is scanned and redacted independently so the response shape required by
     `hookSpecificOutput.updatedToolOutput` is preserved. `field_path` is a dict key,
-    a dotted path for nested keys (e.g. `file.content` for Read), `matches[i]` for
-    elements of a Grep/Glob matches list, or "" when the response itself is a string.
+    a dotted path for nested keys (e.g. `file.content` for Read), `matches[i]` /
+    `filenames[i]` for list elements, or "" when the response itself is a string.
 
     Per-tool field lists were verified against real CC 2.1.x payloads:
       - Bash:  {stdout, stderr, interrupted, isImage, noOutputExpected}
       - Read:  {type, file: {content, filePath, numLines, startLine, totalLines}}
       - REPL:  {code, result, stdout, stderr}
+      - Grep:  {filenames: [...], mode, numFiles}        # plus legacy {output, matches}
+      - Glob:  similar to Grep
+      - Task / Agent: {content, prompt, agentId, agentType, status, ...}
+                      `content` may be a string or a list of message dicts.
     """
     if not isinstance(tool_response, dict):
         text = str(tool_response) if tool_response else ""
@@ -294,6 +328,10 @@ def _iter_output_fields(tool_name: str, tool_response: Any) -> list[tuple[str, s
         string_fields = ("content", "output")
     elif tool_name in ("Grep", "Glob"):
         string_fields = ("output",)
+    elif tool_name in ("Task", "Agent"):
+        # `content` is sometimes a string (final assistant message) and sometimes
+        # a list of message dicts -- handled below alongside the list-element case.
+        string_fields = ("content", "prompt")
     else:
         string_fields = ("content", "output", "result", "text")
 
@@ -304,33 +342,61 @@ def _iter_output_fields(tool_name: str, tool_response: Any) -> list[tuple[str, s
             fields.append((key, val))
 
     if tool_name in ("Grep", "Glob"):
-        matches_val = tool_response.get("matches")
-        if isinstance(matches_val, list):
-            for i, m in enumerate(matches_val):
-                if isinstance(m, str) and m:
-                    fields.append((f"matches[{i}]", m))
+        # Legacy `matches` list AND the verified `filenames` list both expose
+        # one searchable string per entry.
+        for list_key in ("matches", "filenames"):
+            list_val = tool_response.get(list_key)
+            if isinstance(list_val, list):
+                for i, item in enumerate(list_val):
+                    if isinstance(item, str) and item:
+                        fields.append((f"{list_key}[{i}]", item))
+
+    if tool_name in ("Task", "Agent"):
+        # `content` as a list-of-messages: walk each message and grab its text.
+        # Each list entry is typically {type: "text", text: "..."} but we accept
+        # any string leaf -- redact write-back goes back to the same path.
+        content_list = tool_response.get("content")
+        if isinstance(content_list, list):
+            for i, item in enumerate(content_list):
+                if isinstance(item, str) and item:
+                    fields.append((f"content[{i}]", item))
+                elif isinstance(item, dict):
+                    text_val = item.get("text")
+                    if isinstance(text_val, str) and text_val:
+                        fields.append((f"content[{i}].text", text_val))
 
     return fields
 
 
-def _set_output_field(tool_response: dict[str, Any], field_path: str, value: str) -> None:
-    """Write `value` back to `tool_response` at `field_path` (set by _iter_output_fields).
+_FIELD_SEGMENT_RE = re.compile(r"^([^\[]+)((?:\[\d+\])*)$")
 
-    Supports plain keys (`stdout`), dotted paths (`file.content`), and indexed
-    paths (`matches[0]`).
+
+def _parse_field_path(path: str) -> list[str | int]:
+    """Split a field path like `content[3].text` into [`content`, 3, `text`].
+
+    Supports plain keys (`stdout`), dotted keys (`file.content`), single index
+    (`matches[0]`), and the mixed form (`content[3].text`) used by Task/Agent
+    list-of-message responses.
     """
-    if "[" in field_path:
-        key, idx_part = field_path.split("[", 1)
-        tool_response[key][int(idx_part.rstrip("]"))] = value
-        return
-    if "." in field_path:
-        parts = field_path.split(".")
-        cur: Any = tool_response
-        for part in parts[:-1]:
-            cur = cur[part]
-        cur[parts[-1]] = value
-        return
-    tool_response[field_path] = value
+    parts: list[str | int] = []
+    for seg in path.split("."):
+        m = _FIELD_SEGMENT_RE.match(seg)
+        if not m:
+            raise ValueError(f"unparseable field path: {path!r}")
+        parts.append(m.group(1))
+        for idx in re.findall(r"\[(\d+)\]", m.group(2)):
+            parts.append(int(idx))
+    return parts
+
+
+def _set_output_field(tool_response: dict[str, Any], field_path: str, value: str) -> None:
+    """Write `value` back to `tool_response` at `field_path` (as produced by
+    `_iter_output_fields`)."""
+    parts = _parse_field_path(field_path)
+    cur: Any = tool_response
+    for part in parts[:-1]:
+        cur = cur[part]
+    cur[parts[-1]] = value
 
 
 # Spilled-output detection: when a tool returns >50K chars Claude Code persists
@@ -1147,20 +1213,21 @@ def _last_assistant_text(transcript_path: str) -> tuple[str | None, str | None]:
 def handle_stop(data: dict[str, Any], project_dir: Path | None = None) -> int:
     """Handle Stop / SubagentStop - scan the last assistant message for leaks.
 
+    Real CC 2.1.x payload includes `last_assistant_message` (string) directly,
+    so we read it first. We fall back to walking `transcript_path` only if the
+    inline field is absent (older CC, future drift). For SubagentStop the
+    payload also carries `agent_transcript_path` -- the subagent's own
+    transcript -- which we prefer over the parent transcript when falling back.
+
     Both events fire after the message has been delivered, so we cannot redact
     in-flight. Block (decision:block) would just force Claude to keep talking,
     not unsend the message -- so this handler is warn-only.
     """
-    transcript_path = data.get("transcript_path", "")
     hook_event = data.get("hook_event_name", "Stop")
-    if not transcript_path:
-        # Phase 2(b): Stop / SubagentStop need transcript_path to do anything.
-        rules = load_rules(project_dir)
-        llm_rules = [r for r in rules if r.target in ("llm", "both")]
-        if llm_rules:
-            _audit_schema_drift_missing_key(hook_event, "transcript_path", project_dir=project_dir)
-        json.dump({"continue": True}, sys.stdout)
-        return 0
+    inline_msg = data.get("last_assistant_message")
+    transcript_path = (
+        data.get("agent_transcript_path") if hook_event == "SubagentStop" else None
+    ) or data.get("transcript_path", "")
 
     rules = load_rules(project_dir)
     llm_rules = [r for r in rules if r.target in ("llm", "both")]
@@ -1168,11 +1235,24 @@ def handle_stop(data: dict[str, Any], project_dir: Path | None = None) -> int:
         json.dump({"continue": True}, sys.stdout)
         return 0
 
-    text, err = _last_assistant_text(transcript_path)
-    if err is not None:
-        sys.stderr.write(f"{hook_event}: {err}\n")
+    text: str | None = None
+    if isinstance(inline_msg, str) and inline_msg:
+        text = inline_msg
+    elif transcript_path:
+        text, err = _last_assistant_text(transcript_path)
+        if err is not None:
+            sys.stderr.write(f"{hook_event}: {err}\n")
+            json.dump({"continue": True}, sys.stdout)
+            return 0
+    else:
+        # Neither inline message nor transcript path -- the payload is missing
+        # both possible entry points. Drift signal.
+        _audit_schema_drift_missing_key(
+            hook_event, "last_assistant_message|transcript_path", project_dir=project_dir
+        )
         json.dump({"continue": True}, sys.stdout)
         return 0
+
     if not text:
         json.dump({"continue": True}, sys.stdout)
         return 0

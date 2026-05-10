@@ -151,7 +151,7 @@ Claude Code's hook payload schema is undocumented in detail and drifts between r
 - **Live verification harness.** `redact verify-cc-schema` invokes `claude -p` headlessly through scripted scenarios (Bash success, Bash failure, Read, Grep, subagent), captures every hook payload via `REDACT_HOOK_DUMP_DIR`, runs the extractors against each, and diffs the top-level keys against the committed corpus in `tests/fixtures/cc-payloads/`.
 
 ```bash
-redact verify-cc-schema --report-dir ./verify-out
+redact verify-cc-schema --report-dir ./tmp/verify-out
 # → verify-out/report.json  (machine-parseable; feed back to Claude for analysis)
 # → verify-out/report.md    (human summary; "Drift detected" section if any)
 # Exit 0 = no drift, 1 = drift detected, 2 = harness error (e.g. claude not on PATH).

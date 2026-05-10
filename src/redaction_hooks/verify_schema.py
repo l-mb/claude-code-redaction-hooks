@@ -228,6 +228,24 @@ def classify_capture(
     return classify_payload(payload, str(file_path), golden or {})
 
 
+# Events whose handlers use the per-tool extractors (`_get_tool_input_*`
+# and `_iter_output_fields`). Other events have their own entry-point keys
+# checked directly in REQUIRED_KEYS_BY_EVENT below.
+_EXTRACTOR_EVENTS = frozenset({"PreToolUse", "PostToolUse", "PostToolUseFailure"})
+
+# For every non-extractor event, name the top-level keys the handler walks.
+# Order matters: the first match wins (so e.g. Stop prefers the inline
+# `last_assistant_message` and falls back to `transcript_path`).
+_REQUIRED_KEYS_BY_EVENT: dict[str, tuple[str, ...]] = {
+    "UserPromptSubmit": ("prompt",),
+    "InstructionsLoaded": ("file_path",),
+    "PreCompact": ("transcript_path",),
+    "PostCompact": ("transcript_path",),
+    "Stop": ("last_assistant_message", "transcript_path"),
+    "SubagentStop": ("last_assistant_message", "agent_transcript_path", "transcript_path"),
+}
+
+
 def classify_payload(
     payload: dict[str, Any],
     file_label: str,
@@ -263,9 +281,18 @@ def classify_payload(
         for path, content in _iter_output_fields(tool_name, tool_response):
             extractor_fields.append({"field_path": path, "preview": _preview(content)})
 
-    extractor_returned_nothing = (
-        not extractor_fields and not extractor_input_content and not extractor_input_paths
-    )
+    # An "extractor returned nothing" finding only makes sense for events that
+    # actually use the per-tool extractors. For others (Stop, UserPromptSubmit,
+    # InstructionsLoaded, PreCompact, PostCompact) we instead check that at
+    # least one of the handler's documented entry-point keys is present.
+    extractor_returned_nothing = False
+    if event in _EXTRACTOR_EVENTS:
+        extractor_returned_nothing = (
+            not extractor_fields and not extractor_input_content and not extractor_input_paths
+        )
+    elif event in _REQUIRED_KEYS_BY_EVENT:
+        required = _REQUIRED_KEYS_BY_EVENT[event]
+        extractor_returned_nothing = not any(payload.get(k) for k in required)
 
     golden_keys = golden.get((event, tool_name), set())
     new_keys = sorted(set(top_keys) - golden_keys) if golden_keys else []

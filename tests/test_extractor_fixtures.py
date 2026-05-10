@@ -51,6 +51,8 @@ def _load(name: str) -> dict[str, Any]:
     [
         ("PreToolUse-Bash.json", [], "echo hello"),
         ("PreToolUse-Read.json", ["<HOME>/<PROJECT>/README.md"], None),
+        ("PreToolUse-Grep.json", ["<HOME>/<PROJECT>"], "rules"),
+        ("PreToolUse-Agent.json", [], "List the files"),
     ],
 )
 def test_pre_tool_use_extractor_recognises_payload(
@@ -58,11 +60,11 @@ def test_pre_tool_use_extractor_recognises_payload(
     expected_paths: list[str],
     expected_content_substr: str | None,
 ) -> None:
-    """Phase 3: PreToolUse extractor returns non-empty content for known shapes.
+    """PreToolUse extractor returns non-empty content for every known shape.
 
-    Bash payloads have `tool_input.command`; Read payloads have
-    `tool_input.file_path`. If either name moves, this fails before the
-    handler silently misses content in production.
+    Bash → command, Read → file_path, Grep → pattern + path,
+    Agent → description + prompt. If any of these names moves, this fails
+    before the handler silently misses content in production.
     """
     data = _load(fixture)
     tool_name = data["tool_name"]
@@ -74,7 +76,7 @@ def test_pre_tool_use_extractor_recognises_payload(
 
     if expected_paths:
         assert paths == expected_paths, (
-            f"path extractor returned {paths!r} for {fixture}; tool_input.file_path may have moved"
+            f"path extractor returned {paths!r} for {fixture}; tool_input path key may have moved"
         )
     if expected_content_substr is not None:
         assert content is not None and expected_content_substr in content, (
@@ -89,6 +91,8 @@ def test_pre_tool_use_extractor_recognises_payload(
         ("PostToolUse-Bash.json", ("stdout", "hello")),
         ("PostToolUse-Read.json", ("file.content", "First paragraph")),
         ("PostToolUse-REPL.json", ("result", "2")),
+        ("PostToolUse-Grep.json", ("filenames[0]", "README.md")),
+        ("PostToolUse-Agent.json", ("content[0].text", "DONE")),
     ],
 )
 def test_post_tool_use_extractor_recognises_payload(

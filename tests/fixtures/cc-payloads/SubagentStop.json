@@ -1,0 +1,13 @@
+{
+  "session_id": "<SESSION>",
+  "transcript_path": "<HOME>/.claude/projects/-<PROJECT>/<SESSION>.jsonl",
+  "agent_transcript_path": "<HOME>/.claude/projects/-<PROJECT>/<SESSION>-subagent.jsonl",
+  "agent_id": "<TOOL_USE>",
+  "agent_type": "general-purpose",
+  "cwd": "<HOME>/<PROJECT>",
+  "permission_mode": "auto",
+  "effort": {"level": "high"},
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "last_assistant_message": "Files: README.md, .redaction_rules\nDONE"
+}

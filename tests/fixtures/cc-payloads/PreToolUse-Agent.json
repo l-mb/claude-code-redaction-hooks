@@ -1,0 +1,15 @@
+{
+  "session_id": "<SESSION>",
+  "transcript_path": "<HOME>/.claude/projects/-<PROJECT>/<SESSION>.jsonl",
+  "cwd": "<HOME>/<PROJECT>",
+  "permission_mode": "auto",
+  "effort": {"level": "high"},
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Agent",
+  "tool_input": {
+    "description": "List cwd files",
+    "prompt": "List the files in the current working directory and reply DONE.",
+    "subagent_type": "general-purpose"
+  },
+  "tool_use_id": "<TOOL_USE>"
+}

@@ -1,0 +1,8 @@
+{
+  "session_id": "<SESSION>",
+  "transcript_path": "<HOME>/.claude/projects/-<PROJECT>/<SESSION>.jsonl",
+  "cwd": "<HOME>/<PROJECT>",
+  "permission_mode": "auto",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Please run echo hello once."
+}

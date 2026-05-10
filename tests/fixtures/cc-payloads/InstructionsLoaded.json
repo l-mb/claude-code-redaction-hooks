@@ -1,0 +1,9 @@
+{
+  "session_id": "<SESSION>",
+  "transcript_path": "<HOME>/.claude/projects/-<PROJECT>/<SESSION>.jsonl",
+  "cwd": "<HOME>/<PROJECT>",
+  "hook_event_name": "InstructionsLoaded",
+  "file_path": "<HOME>/<PROJECT>/CLAUDE.md",
+  "memory_type": "Project",
+  "load_reason": "session_start"
+}
