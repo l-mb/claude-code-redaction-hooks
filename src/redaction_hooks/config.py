@@ -19,7 +19,7 @@ from typing import Any
 
 import yaml
 
-from .models import Action, Rule, Target
+from .models import Action, Replacement, Rule, Target
 
 VALID_ACTIONS = {"block", "redact", "warn"}
 VALID_TARGETS = {"llm", "tool", "both"}
@@ -127,10 +127,19 @@ def add_hashed_rule(
     hash_extractor: str = r"\b\w{4,}\b",
     action: Action = "block",
     target: Target = "both",
+    replacement: Replacement | None = None,
     global_: bool = False,
     project_dir: Path | None = None,
 ) -> Rule:
-    """Add a new hashed rule to the rules file."""
+    """Add a new hashed rule to the rules file.
+
+    `replacement` is only meaningful when `action == "redact"` -- it picks
+    the redaction style (`"ip"` / `"email"` / `"hostname"`, or a literal
+    string). Mismatched combinations raise ValueError.
+    """
+    if replacement is not None and action != "redact":
+        raise ValueError(f"replacement is only valid with action='redact', got action={action!r}")
+
     from .matcher import hash_text
 
     path = get_rules_path(global_=global_, project_dir=project_dir)
@@ -146,6 +155,7 @@ def add_hashed_rule(
         hash_extractor=hash_extractor,
         action=action,
         target=target,
+        replacement=replacement,
         description=description,
     )
     rules.append(new_rule)

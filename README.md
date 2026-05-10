@@ -52,6 +52,10 @@ redact claude-setup --global      # write to ~/.claude/settings.json
 
 ```bash
 redact secret add --id NAME    # add hashed secret (reads from stdin or $REDACT_SECRET)
+                               # optional: --action {block,redact,warn} (default block)
+                               #           --target {llm,tool,both}     (default both)
+                               #           --hash-extractor REGEX        (default \b\w{4,}\b)
+                               #           --replacement STR             (only with --action redact)
 redact secret list             # list hashed rule ids
 redact edit                    # edit rules in $EDITOR (validates after save)
 redact validate                # validate rules file syntax

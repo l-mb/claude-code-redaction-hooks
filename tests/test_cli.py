@@ -81,6 +81,75 @@ def test_secret_add_empty_fails(project_dir: Path) -> None:
     assert "No secret provided" in err
 
 
+def test_secret_add_with_action_redact_and_replacement(project_dir: Path) -> None:
+    """`secret add --action redact --replacement '[X]'` persists both fields."""
+    code, _, err = run_cli(
+        "secret",
+        "add",
+        "--id",
+        "redact-x",
+        "--action",
+        "redact",
+        "--replacement",
+        "[X]",
+        stdin_text="abcdef",
+    )
+    assert code == 0, err
+    rules = load_rules_file(project_dir / ".redaction_rules")
+    assert len(rules) == 1
+    assert rules[0].action == "redact"
+    assert rules[0].replacement == "[X]"
+
+
+def test_secret_add_with_target_llm(project_dir: Path) -> None:
+    """`--target llm` is persisted on the saved rule."""
+    code, _, err = run_cli(
+        "secret",
+        "add",
+        "--id",
+        "llm-only",
+        "--target",
+        "llm",
+        stdin_text="abcdef",
+    )
+    assert code == 0, err
+    rules = load_rules_file(project_dir / ".redaction_rules")
+    assert rules[0].target == "llm"
+
+
+def test_secret_add_with_custom_hash_extractor(project_dir: Path) -> None:
+    """Custom --hash-extractor regex is persisted verbatim."""
+    code, _, err = run_cli(
+        "secret",
+        "add",
+        "--id",
+        "long-only",
+        "--hash-extractor",
+        r"\b\w{8,}\b",
+        stdin_text="longenough",
+    )
+    assert code == 0, err
+    rules = load_rules_file(project_dir / ".redaction_rules")
+    assert rules[0].hash_extractor == r"\b\w{8,}\b"
+
+
+def test_secret_add_replacement_without_redact_errors(project_dir: Path) -> None:
+    """`--replacement` is rejected with an explicit error when --action != redact."""
+    code, _, err = run_cli(
+        "secret",
+        "add",
+        "--id",
+        "bad",
+        "--replacement",
+        "[X]",  # default --action is block
+        stdin_text="abcdef",
+    )
+    assert code == 1
+    assert "--replacement only applies to --action redact" in err
+    # No rule should have been written.
+    assert load_rules_file(project_dir / ".redaction_rules") == []
+
+
 def test_secret_list(project_dir: Path) -> None:
     """Test listing hashed secrets."""
     # First add a secret

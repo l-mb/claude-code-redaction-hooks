@@ -102,6 +102,13 @@ def cmd_hook(args: argparse.Namespace) -> int:
 
 def cmd_secret_add(args: argparse.Namespace) -> int:
     """Add a hashed secret rule."""
+    if args.replacement is not None and args.action != "redact":
+        print(
+            f"Error: --replacement only applies to --action redact (got --action {args.action})",
+            file=sys.stderr,
+        )
+        return 1
+
     secret = os.environ.get("REDACT_SECRET")
     if not secret:
         if sys.stdin.isatty():
@@ -116,6 +123,10 @@ def cmd_secret_add(args: argparse.Namespace) -> int:
         secret=secret,
         rule_id=args.id,
         description=args.description or "",
+        hash_extractor=args.hash_extractor,
+        action=args.action,
+        target=args.target,
+        replacement=args.replacement,
         global_=args.glob,
     )
     path = get_rules_path(global_=args.glob)
@@ -425,6 +436,32 @@ def main() -> int | NoReturn:
     add_parser = secret_sub.add_parser("add", help="Add a hashed secret rule")
     add_parser.add_argument("--id", required=True, help="Rule ID")
     add_parser.add_argument("--description", help="Rule description")
+    add_parser.add_argument(
+        "--action",
+        choices=["block", "redact", "warn"],
+        default="block",
+        help="Rule action when the hashed secret matches (default: block)",
+    )
+    add_parser.add_argument(
+        "--target",
+        choices=["llm", "tool", "both"],
+        default="both",
+        help="Where the rule applies: llm prompts, tool I/O, or both (default: both)",
+    )
+    add_parser.add_argument(
+        "--hash-extractor",
+        dest="hash_extractor",
+        default=r"\b\w{4,}\b",
+        help=r"Regex extracting candidate segments to hash (default: '\b\w{4,}\b')",
+    )
+    add_parser.add_argument(
+        "--replacement",
+        default=None,
+        help=(
+            "Replacement style for --action redact: literal string, or one of "
+            "'ip' / 'email' / 'hostname'. Rejected when --action != redact."
+        ),
+    )
     add_parser.add_argument(
         "--global", dest="glob", action="store_true", help="Add to global rules"
     )
