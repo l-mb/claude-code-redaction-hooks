@@ -33,10 +33,10 @@ from typing import Any
 
 import pytest
 
-from redaction_hooks.hooks import (
-    _get_tool_input_content,
-    _get_tool_input_paths,
-    _iter_output_fields,
+from redaction_hooks.extractors import (
+    get_tool_input_content,
+    get_tool_input_paths,
+    iter_output_fields,
 )
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "cc-payloads"
@@ -85,8 +85,8 @@ def test_pre_tool_use_extractor_recognises_payload(
     tool_input = data["tool_input"]
     assert isinstance(tool_name, str) and isinstance(tool_input, dict)
 
-    paths = _get_tool_input_paths(tool_name, tool_input)
-    content = _get_tool_input_content(tool_name, tool_input)
+    paths = get_tool_input_paths(tool_name, tool_input)
+    content = get_tool_input_content(tool_name, tool_input)
 
     if expected_path_regex is not None:
         assert len(paths) == 1, (
@@ -140,9 +140,9 @@ def test_post_tool_use_extractor_recognises_payload(
     tool_response = data["tool_response"]
     assert isinstance(tool_name, str)
 
-    fields = _iter_output_fields(tool_name, tool_response)
+    fields = iter_output_fields(tool_name, tool_response)
     assert fields, (
-        f"_iter_output_fields returned [] for {fixture}; "
+        f"iter_output_fields returned [] for {fixture}; "
         "this means production hits the recursive fallback (block-only) and "
         "loses redact capability -- update the per-tool field list in hooks.py"
     )
@@ -161,7 +161,7 @@ def test_post_tool_use_extractor_recognises_payload(
 
 def test_post_tool_use_failure_extractor_recognises_payload() -> None:
     """Phase 3: PostToolUseFailure -- the `error` key is the canonical
-    failure-info field; `tool_input` is also scanned via `_get_tool_input_content`.
+    failure-info field; `tool_input` is also scanned via `get_tool_input_content`.
     """
     data = _load("PostToolUseFailure-Bash.json")
     assert "error" in data, (
@@ -172,7 +172,7 @@ def test_post_tool_use_failure_extractor_recognises_payload() -> None:
     tool_name = data["tool_name"]
     tool_input = data["tool_input"]
     assert isinstance(tool_name, str) and isinstance(tool_input, dict)
-    content = _get_tool_input_content(tool_name, tool_input)
+    content = get_tool_input_content(tool_name, tool_input)
     assert content and "ls" in content
 
 

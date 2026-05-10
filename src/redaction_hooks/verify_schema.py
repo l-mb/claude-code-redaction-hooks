@@ -37,10 +37,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .hooks import (
-    _get_tool_input_content,
-    _get_tool_input_paths,
-    _iter_output_fields,
+from .extractors import (
+    get_tool_input_content,
+    get_tool_input_paths,
+    iter_output_fields,
 )
 
 
@@ -275,8 +275,8 @@ def classify_capture(
     return classify_payload(payload, str(file_path), golden or {})
 
 
-# Events whose handlers use the per-tool extractors (`_get_tool_input_*`
-# and `_iter_output_fields`). Other events have their own entry-point keys
+# Events whose handlers use the per-tool extractors (`get_tool_input_*`
+# and `iter_output_fields`). Other events have their own entry-point keys
 # checked directly in REQUIRED_KEYS_BY_EVENT below.
 _EXTRACTOR_EVENTS = frozenset({"PreToolUse", "PostToolUse", "PostToolUseFailure"})
 
@@ -328,11 +328,11 @@ def classify_payload(
         and isinstance(tool_input, dict)
         and event in ("PreToolUse", "PostToolUseFailure")
     ):
-        content = _get_tool_input_content(tool_name, tool_input)
+        content = get_tool_input_content(tool_name, tool_input)
         extractor_input_content = _preview(content) if content else None
-        extractor_input_paths = _get_tool_input_paths(tool_name, tool_input)
+        extractor_input_paths = get_tool_input_paths(tool_name, tool_input)
     if isinstance(tool_name, str) and event == "PostToolUse" and tool_response is not None:
-        for path, content in _iter_output_fields(tool_name, tool_response):
+        for path, content in iter_output_fields(tool_name, tool_response):
             extractor_fields.append({"field_path": path, "preview": _preview(content)})
 
     # An "extractor returned nothing" finding only makes sense for events that

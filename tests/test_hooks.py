@@ -23,11 +23,9 @@ from unittest.mock import patch
 
 import pytest
 
-from redaction_hooks.hooks import (
-    handle_pre_tool_use,
-    handle_user_prompt_submit,
-    run_hook,
-)
+from redaction_hooks.handlers.pre_tool_use import handle_pre_tool_use
+from redaction_hooks.handlers.user_prompt_submit import handle_user_prompt_submit
+from redaction_hooks.hooks import run_hook
 
 
 @pytest.fixture
@@ -264,7 +262,7 @@ rules:
 
 def test_post_tool_use_blocks_secret_in_read_output(rules_dir: Path) -> None:
     """Test PostToolUse blocks AWS key in Read tool output."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     data = {
         "hook_event_name": "PostToolUse",
@@ -279,7 +277,7 @@ def test_post_tool_use_blocks_secret_in_read_output(rules_dir: Path) -> None:
 
 def test_post_tool_use_blocks_secret_in_bash_output(rules_dir: Path) -> None:
     """Test PostToolUse blocks AWS key in Bash tool output."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     data = {
         "hook_event_name": "PostToolUse",
@@ -293,7 +291,7 @@ def test_post_tool_use_blocks_secret_in_bash_output(rules_dir: Path) -> None:
 
 def test_post_tool_use_allows_clean_output(rules_dir: Path) -> None:
     """Test PostToolUse allows clean tool output."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     data = {
         "hook_event_name": "PostToolUse",
@@ -307,7 +305,7 @@ def test_post_tool_use_allows_clean_output(rules_dir: Path) -> None:
 
 def test_post_tool_use_redacts_via_updated_tool_output(rules_dir: Path) -> None:
     """Test PostToolUse redacts output via hookSpecificOutput.updatedToolOutput."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     data = {
         "hook_event_name": "PostToolUse",
@@ -324,7 +322,7 @@ def test_post_tool_use_redacts_via_updated_tool_output(rules_dir: Path) -> None:
 
 def test_post_tool_use_redacts_bash_stdout_and_stderr(tmp_path: Path) -> None:
     """Test PostToolUse independently redacts each Bash output field."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -354,7 +352,7 @@ rules:
 def test_post_tool_use_blocks_grep_filenames_list(tmp_path: Path) -> None:
     """Real CC Grep response is `{filenames: [...], mode, numFiles}`. The named
     extractor must catch a secret in any filename entry."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -419,7 +417,7 @@ rules:
 def test_post_tool_use_blocks_agent_content_list(tmp_path: Path) -> None:
     """Agent tool_response.content is a list-of-message-dicts; we pull `.text`
     from each entry."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -445,7 +443,7 @@ rules:
 
 def test_post_tool_use_redacts_agent_content_list(tmp_path: Path) -> None:
     """Redact rewrites the nested content[i].text leaf without mangling siblings."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -479,17 +477,17 @@ rules:
 
 
 def test_set_output_field_handles_combined_path() -> None:
-    """_set_output_field must walk `key[idx].subkey` paths used by Agent/Task."""
-    from redaction_hooks.hooks import _set_output_field
+    """set_output_field must walk `key[idx].subkey` paths used by Agent/Task."""
+    from redaction_hooks.extractors import set_output_field
 
     obj: dict[str, object] = {"content": [{"type": "text", "text": "old"}]}
-    _set_output_field(obj, "content[0].text", "new")
+    set_output_field(obj, "content[0].text", "new")
     assert obj == {"content": [{"type": "text", "text": "new"}]}
 
 
 def test_post_tool_use_redacts_grep_matches_list(tmp_path: Path) -> None:
     """Test PostToolUse redacts each element of a Grep matches list independently."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -520,7 +518,7 @@ rules:
 
 def test_post_tool_use_redaction_consistent_across_fields(tmp_path: Path) -> None:
     """Test the same secret in two fields gets the same replacement (mapping store)."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -551,7 +549,7 @@ rules:
 
 def test_post_tool_use_block_wins_over_redact(tmp_path: Path) -> None:
     """Test PostToolUse blocks when block and redact rules both match across fields."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -582,7 +580,7 @@ rules:
 
 def test_post_tool_use_warn_only_emits_warning_no_update(tmp_path: Path) -> None:
     """Test PostToolUse warn-only matches emit warning but no updatedToolOutput."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -606,7 +604,7 @@ rules:
 
 def test_post_tool_use_non_dict_response_warns(tmp_path: Path) -> None:
     """Test PostToolUse with string-shaped tool_response cannot redact safely."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -634,7 +632,7 @@ def test_post_tool_use_blocks_secret_in_real_read_shape(rules_dir: Path) -> None
 
     The content lives at `tool_response.file.content`, not at top level.
     """
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     data = {
         "hook_event_name": "PostToolUse",
@@ -658,7 +656,7 @@ def test_post_tool_use_blocks_secret_in_real_read_shape(rules_dir: Path) -> None
 
 def test_post_tool_use_redacts_in_real_read_shape(rules_dir: Path) -> None:
     """Redact rewrite preserves the nested {file: {content}} shape."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     data = {
         "hook_event_name": "PostToolUse",
@@ -687,7 +685,7 @@ def test_post_tool_use_redacts_in_real_read_shape(rules_dir: Path) -> None:
 
 def test_post_tool_use_blocks_spilled_output_file(tmp_path: Path) -> None:
     """A spill stub ({file_path, preview, ...}) is scanned by reading the file."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     spill = tmp_path / "spilled.txt"
     spill.write_text("user data\nAKIAIOSFODNN7EXAMPLE\nmore data\n")
@@ -717,7 +715,7 @@ rules:
 def test_post_tool_use_warns_redact_match_in_spilled(tmp_path: Path) -> None:
     """Redact rules in spilled-output content emit a redact-skipped audit entry."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     spill = tmp_path / "spilled.txt"
     spill.write_text("contact alice@secret.com please\n")
@@ -755,7 +753,7 @@ rules:
 
 def test_post_tool_use_unreadable_spilled_file_warns(tmp_path: Path) -> None:
     """A spill stub pointing at a missing file emits stderr and allows."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -782,7 +780,7 @@ rules:
 
 def test_post_tool_use_recursive_fallback_blocks_unknown_shape(tmp_path: Path) -> None:
     """Unknown dict shapes fall back to a recursive walk so secrets still match."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -805,7 +803,7 @@ rules:
 
 def test_post_tool_use_known_shape_skips_recursive_walk(tmp_path: Path) -> None:
     """A recognised tool_response shape must not trigger the recursive fallback."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     # Bash has known fields stdout/stderr/output. A secret in `extra` (not a known
     # field) should NOT match because we recognised stdout and skipped the walk.
@@ -831,7 +829,7 @@ rules:
 
 def test_post_tool_use_spill_indicator_alone_required(tmp_path: Path) -> None:
     """`file_path` without any spill indicator is not treated as a spill stub."""
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     spill = tmp_path / "secret.txt"
     spill.write_text("AKIAIOSFODNN7EXAMPLE\n")
@@ -859,7 +857,7 @@ def test_post_tool_use_failure_audits_error_match(tmp_path: Path) -> None:
     Real CC 2.1.x failure payload uses key `error` (not `tool_error`).
     """
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_post_tool_use_failure
+    from redaction_hooks.handlers.post_tool_use_failure import handle_post_tool_use_failure
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -896,7 +894,7 @@ def test_post_tool_use_failure_ignores_legacy_tool_error_key(tmp_path: Path) -> 
     `error` key is absent, so the schema-drift signal must fire.
     """
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_post_tool_use_failure
+    from redaction_hooks.handlers.post_tool_use_failure import handle_post_tool_use_failure
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -923,7 +921,7 @@ rules:
 
 def test_post_tool_use_failure_scans_input_too(tmp_path: Path) -> None:
     """Failed-tool input is scanned in case PreToolUse missed it."""
-    from redaction_hooks.hooks import handle_post_tool_use_failure
+    from redaction_hooks.handlers.post_tool_use_failure import handle_post_tool_use_failure
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -948,7 +946,7 @@ rules:
 def test_post_tool_use_failure_clean_is_no_op(tmp_path: Path) -> None:
     """No matches => no audit entry, exit 0."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_post_tool_use_failure
+    from redaction_hooks.handlers.post_tool_use_failure import handle_post_tool_use_failure
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -1058,7 +1056,7 @@ def test_post_tool_use_recursive_walk_emits_drift(tmp_path: Path) -> None:
     """Phase 2(a): if PostToolUse only catches a secret via the recursive walk
     over an unknown dict shape, a schema-drift audit must fire."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -1087,7 +1085,7 @@ rules:
 def test_post_tool_use_no_drift_on_known_field(tmp_path: Path) -> None:
     """Phase 2(a): drift signal must NOT fire when the named field caught the match."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -1109,7 +1107,7 @@ rules:
 def test_pre_compact_drift_when_transcript_path_missing(tmp_path: Path) -> None:
     """Phase 2(b): PreCompact without transcript_path emits drift if llm rules exist."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_pre_compact
+    from redaction_hooks.handlers.compact import handle_pre_compact
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -1131,7 +1129,7 @@ rules:
 def test_post_compact_drift_when_transcript_path_missing(tmp_path: Path) -> None:
     """Phase 2(b): PostCompact -- same pattern."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_post_compact
+    from redaction_hooks.handlers.compact import handle_post_compact
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -1152,7 +1150,7 @@ rules:
 def test_stop_drift_when_transcript_path_missing(tmp_path: Path) -> None:
     """Phase 2(b): Stop / SubagentStop -- same pattern, with hook label preserved."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_stop
+    from redaction_hooks.handlers.stop import handle_stop
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -1175,7 +1173,7 @@ rules:
 def test_instructions_loaded_drift_when_file_path_missing(tmp_path: Path) -> None:
     """Phase 2(b): InstructionsLoaded -- same pattern."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_instructions_loaded
+    from redaction_hooks.handlers.instructions_loaded import handle_instructions_loaded
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -1505,7 +1503,7 @@ def test_audit_logged_on_user_prompt_submit_block(rules_dir: Path) -> None:
 def test_audit_logged_on_post_tool_use_redact(rules_dir: Path) -> None:
     """A PostToolUse redact event writes a 'redact' entry."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_post_tool_use
+    from redaction_hooks.handlers.post_tool_use import handle_post_tool_use
 
     data = {
         "hook_event_name": "PostToolUse",
@@ -1837,7 +1835,7 @@ def _write_transcript(path: Path, *messages: dict[str, Any]) -> None:
 
 def test_pre_compact_blocks_when_transcript_contains_secret(tmp_path: Path) -> None:
     """PreCompact blocks compaction if a block-action rule matches the transcript."""
-    from redaction_hooks.hooks import handle_pre_compact
+    from redaction_hooks.handlers.compact import handle_pre_compact
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(
@@ -1865,7 +1863,7 @@ rules:
 
 def test_pre_compact_allows_clean_transcript(tmp_path: Path) -> None:
     """PreCompact allows compaction when no block rule matches."""
-    from redaction_hooks.hooks import handle_pre_compact
+    from redaction_hooks.handlers.compact import handle_pre_compact
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(
@@ -1892,7 +1890,7 @@ rules:
 def test_pre_compact_warns_on_redact_rule_match(tmp_path: Path) -> None:
     """Redact rules cannot rewrite a compaction summary; warn + audit only."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_pre_compact
+    from redaction_hooks.handlers.compact import handle_pre_compact
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(transcript, {"type": "user", "content": "contact alice@secret.com"})
@@ -1921,7 +1919,7 @@ rules:
 
 def test_pre_compact_skips_target_tool_only_rules(tmp_path: Path) -> None:
     """Rules with target=tool do not apply to PreCompact (which targets the LLM)."""
-    from redaction_hooks.hooks import handle_pre_compact
+    from redaction_hooks.handlers.compact import handle_pre_compact
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(transcript, {"type": "assistant", "content": "AKIAIOSFODNN7EXAMPLE"})
@@ -1943,7 +1941,7 @@ rules:
 
 def test_pre_compact_handles_unreadable_transcript(tmp_path: Path) -> None:
     """A missing or unreadable transcript_path emits stderr and allows compaction."""
-    from redaction_hooks.hooks import handle_pre_compact
+    from redaction_hooks.handlers.compact import handle_pre_compact
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -1965,7 +1963,7 @@ rules:
 
 def test_pre_compact_skips_malformed_jsonl_lines(tmp_path: Path) -> None:
     """Malformed lines in the transcript are skipped without crashing."""
-    from redaction_hooks.hooks import handle_pre_compact
+    from redaction_hooks.handlers.compact import handle_pre_compact
 
     transcript = tmp_path / "session.jsonl"
     transcript.write_text(
@@ -1990,7 +1988,7 @@ rules:
 
 def test_pre_compact_no_transcript_path_allows(tmp_path: Path) -> None:
     """Missing transcript_path field allows compaction (no-op)."""
-    from redaction_hooks.hooks import handle_pre_compact
+    from redaction_hooks.handlers.compact import handle_pre_compact
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -2006,7 +2004,7 @@ rules:
 def test_instructions_loaded_audits_secret_in_claude_md(tmp_path: Path) -> None:
     """Loading a CLAUDE.md with a known secret pattern audits + warns."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_instructions_loaded
+    from redaction_hooks.handlers.instructions_loaded import handle_instructions_loaded
 
     instr = tmp_path / "CLAUDE.md"
     instr.write_text("Important: AWS key is AKIAIOSFODNN7EXAMPLE -- do not commit\n")
@@ -2039,7 +2037,7 @@ rules:
 def test_instructions_loaded_clean_no_audit(tmp_path: Path) -> None:
     """Clean instruction file produces no audit entry."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_instructions_loaded
+    from redaction_hooks.handlers.instructions_loaded import handle_instructions_loaded
 
     instr = tmp_path / "CLAUDE.md"
     instr.write_text("Normal project guidance with no secrets.\n")
@@ -2063,7 +2061,7 @@ rules:
 def test_instructions_loaded_skips_target_tool_only_rules(tmp_path: Path) -> None:
     """Rules with target=tool do not apply to InstructionsLoaded (LLM-side)."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_instructions_loaded
+    from redaction_hooks.handlers.instructions_loaded import handle_instructions_loaded
 
     instr = tmp_path / "CLAUDE.md"
     instr.write_text("AKIAIOSFODNN7EXAMPLE\n")
@@ -2087,7 +2085,7 @@ rules:
 
 def test_instructions_loaded_unreadable_file_is_no_op(tmp_path: Path) -> None:
     """A missing instruction file emits stderr and returns continue:true."""
-    from redaction_hooks.hooks import handle_instructions_loaded
+    from redaction_hooks.handlers.instructions_loaded import handle_instructions_loaded
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -2129,7 +2127,7 @@ def test_run_hook_dispatches_instructions_loaded(tmp_path: Path) -> None:
 def test_stop_warns_on_secret_in_last_assistant_message(tmp_path: Path) -> None:
     """Stop scans the LAST assistant turn and warns if a rule matches."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_stop
+    from redaction_hooks.handlers.stop import handle_stop
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(
@@ -2162,7 +2160,7 @@ rules:
 def test_stop_does_not_match_earlier_turns(tmp_path: Path) -> None:
     """A secret in an earlier assistant turn must NOT trigger Stop -- only the latest."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_stop
+    from redaction_hooks.handlers.stop import handle_stop
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(
@@ -2186,7 +2184,7 @@ rules:
 def test_subagent_stop_uses_subagentstop_hook_label(tmp_path: Path) -> None:
     """Audit entries written from SubagentStop must carry the SubagentStop hook tag."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_stop
+    from redaction_hooks.handlers.stop import handle_stop
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(transcript, {"type": "assistant", "content": "leak: AKIAIOSFODNN7EXAMPLE"})
@@ -2206,7 +2204,7 @@ rules:
 
 def test_stop_handles_role_field(tmp_path: Path) -> None:
     """Transcript turns using `role` instead of `type` are also recognised."""
-    from redaction_hooks.hooks import handle_stop
+    from redaction_hooks.handlers.stop import handle_stop
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(
@@ -2229,7 +2227,7 @@ rules:
 
 def test_stop_handles_nested_message_role(tmp_path: Path) -> None:
     """Transcript turns where role is nested under `message.role` are recognised."""
-    from redaction_hooks.hooks import handle_stop
+    from redaction_hooks.handlers.stop import handle_stop
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(
@@ -2252,7 +2250,7 @@ rules:
 
 def test_stop_no_assistant_message_is_no_op(tmp_path: Path) -> None:
     """Transcript with no assistant turns is a clean no-op."""
-    from redaction_hooks.hooks import handle_stop
+    from redaction_hooks.handlers.stop import handle_stop
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(transcript, {"type": "user", "content": "AKIAIOSFODNN7EXAMPLE"})
@@ -2270,7 +2268,7 @@ rules:
 
 def test_stop_unreadable_transcript_warns(tmp_path: Path) -> None:
     """A missing transcript_path emits stderr and returns continue:true."""
-    from redaction_hooks.hooks import handle_stop
+    from redaction_hooks.handlers.stop import handle_stop
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -2292,7 +2290,7 @@ rules:
 def test_stop_prefers_inline_last_assistant_message(tmp_path: Path) -> None:
     """Real CC payload carries `last_assistant_message` directly. The handler
     must read it without touching the transcript file."""
-    from redaction_hooks.hooks import handle_stop
+    from redaction_hooks.handlers.stop import handle_stop
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -2316,7 +2314,7 @@ rules:
 def test_subagent_stop_prefers_agent_transcript_path(tmp_path: Path) -> None:
     """SubagentStop has its own `agent_transcript_path`. When falling back
     (no inline message), we walk THAT, not the parent transcript_path."""
-    from redaction_hooks.hooks import handle_stop
+    from redaction_hooks.handlers.stop import handle_stop
 
     parent_transcript = tmp_path / "parent.jsonl"
     _write_transcript(parent_transcript, {"type": "assistant", "content": "parent says hi"})
@@ -2346,7 +2344,7 @@ rules:
 def test_stop_drift_when_neither_inline_nor_transcript(tmp_path: Path) -> None:
     """Both inline message AND transcript_path missing → schema-drift signal."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_stop
+    from redaction_hooks.handlers.stop import handle_stop
 
     (tmp_path / ".redaction_rules").write_text("""
 rules:
@@ -2377,7 +2375,7 @@ def test_run_hook_dispatches_stop(tmp_path: Path) -> None:
 def test_post_compact_audits_secret_in_compacted_transcript(tmp_path: Path) -> None:
     """PostCompact warns + audits when the post-compaction transcript still leaks."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_post_compact
+    from redaction_hooks.handlers.compact import handle_post_compact
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(
@@ -2411,7 +2409,7 @@ rules:
 def test_post_compact_clean_no_op(tmp_path: Path) -> None:
     """A clean compacted transcript writes no audit entry."""
     from redaction_hooks.audit import read_entries
-    from redaction_hooks.hooks import handle_post_compact
+    from redaction_hooks.handlers.compact import handle_post_compact
 
     transcript = tmp_path / "session.jsonl"
     _write_transcript(transcript, {"type": "assistant", "content": "ok"})
@@ -2536,14 +2534,14 @@ rules:
     assert code == 0
 
 
-# Tests for _extract_bash_paths
+# Tests for extract_bash_paths
 
 
 def test_bash_paths_compound_command(tmp_path: Path) -> None:
     """Each subcommand in a compound bash command is tokenized independently."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    paths = _extract_bash_paths("cd /tmp && cat /etc/hosts || rm /var/log/x")
+    paths = extract_bash_paths("cd /tmp && cat /etc/hosts || rm /var/log/x")
     assert "/tmp" in paths
     assert "/etc/hosts" in paths
     assert "/var/log/x" in paths
@@ -2553,9 +2551,9 @@ def test_bash_paths_compound_command(tmp_path: Path) -> None:
 
 def test_bash_paths_handles_pipe_and_semicolons(tmp_path: Path) -> None:
     """Commands joined by | or ; are split into independent subcommands."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    paths = _extract_bash_paths("cat /etc/hosts | grep foo ; head /etc/passwd")
+    paths = extract_bash_paths("cat /etc/hosts | grep foo ; head /etc/passwd")
     assert "/etc/hosts" in paths
     assert "/etc/passwd" in paths
     assert "foo" not in paths
@@ -2563,9 +2561,9 @@ def test_bash_paths_handles_pipe_and_semicolons(tmp_path: Path) -> None:
 
 def test_bash_paths_extracts_value_from_flag_assignment(tmp_path: Path) -> None:
     """`--key=value` contributes the value, not the whole `--key=value` token."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    paths = _extract_bash_paths("cmd --output=/tmp/out --dir=/var/log -o=/tmp/x")
+    paths = extract_bash_paths("cmd --output=/tmp/out --dir=/var/log -o=/tmp/x")
     assert "/tmp/out" in paths
     assert "/var/log" in paths
     assert "/tmp/x" in paths
@@ -2574,9 +2572,9 @@ def test_bash_paths_extracts_value_from_flag_assignment(tmp_path: Path) -> None:
 
 def test_bash_paths_skips_bare_flags(tmp_path: Path) -> None:
     """Flags without `=` are not extracted as paths."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    paths = _extract_bash_paths("git commit --no-verify -m 'msg'")
+    paths = extract_bash_paths("git commit --no-verify -m 'msg'")
     assert "--no-verify" not in paths
     assert "-m" not in paths
     # `msg` has no /. and is not a flag -> not a path
@@ -2585,9 +2583,9 @@ def test_bash_paths_skips_bare_flags(tmp_path: Path) -> None:
 
 def test_bash_paths_skips_non_path_tokens(tmp_path: Path) -> None:
     """Tokens that look like config values, not paths, are not extracted."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    paths = _extract_bash_paths("git config user.email alice@example.com")
+    paths = extract_bash_paths("git config user.email alice@example.com")
     assert "alice@example.com" not in paths
     assert "user.email" not in paths
     assert "config" not in paths
@@ -2595,18 +2593,18 @@ def test_bash_paths_skips_non_path_tokens(tmp_path: Path) -> None:
 
 def test_bash_paths_url_in_flag_value_skipped(tmp_path: Path) -> None:
     """A URL embedded in `--key=URL` is not classified as a path."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    paths = _extract_bash_paths("curl --url=https://example.com -o /tmp/x")
+    paths = extract_bash_paths("curl --url=https://example.com -o /tmp/x")
     assert "/tmp/x" in paths
     assert not any(p.startswith("http") for p in paths)
 
 
 def test_bash_paths_falls_back_on_unbalanced_quotes(tmp_path: Path) -> None:
     """Malformed (unclosed) shell input still yields paths via regex fallback."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    paths = _extract_bash_paths("cat /etc/passwd 'unterminated")  # unclosed quote
+    paths = extract_bash_paths("cat /etc/passwd 'unterminated")  # unclosed quote
     assert any("/etc/passwd" in p for p in paths)
 
 
@@ -2616,30 +2614,30 @@ def test_bash_paths_falls_back_on_unbalanced_quotes(tmp_path: Path) -> None:
 
 def test_bash_paths_recurses_into_bash_c() -> None:
     """`bash -c "cat /etc/passwd"` exposes /etc/passwd to path-pattern rules."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    assert "/etc/passwd" in _extract_bash_paths('bash -c "cat /etc/passwd"')
+    assert "/etc/passwd" in extract_bash_paths('bash -c "cat /etc/passwd"')
 
 
 def test_bash_paths_recurses_into_sh_c_single_quoted() -> None:
     """`sh -c '...'` is recursed identically to bash -c."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    assert "/etc/passwd" in _extract_bash_paths("sh -c 'cat /etc/passwd'")
+    assert "/etc/passwd" in extract_bash_paths("sh -c 'cat /etc/passwd'")
 
 
 def test_bash_paths_recurses_with_absolute_shell_path() -> None:
     """Recursion matches the basename, so /usr/bin/bash works too."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    assert "/tmp/x" in _extract_bash_paths('/usr/bin/bash -c "cat /tmp/x"')
+    assert "/tmp/x" in extract_bash_paths('/usr/bin/bash -c "cat /tmp/x"')
 
 
 def test_bash_paths_inner_with_no_paths_is_empty() -> None:
     """An inner command with no path tokens contributes nothing."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    assert _extract_bash_paths('bash -c "echo hi"') == []
+    assert extract_bash_paths('bash -c "echo hi"') == []
 
 
 def test_bash_paths_inner_with_multiple_path_args() -> None:
@@ -2651,40 +2649,40 @@ def test_bash_paths_inner_with_multiple_path_args() -> None:
     `<shell> -c <inner>` token boundary. Tested here with a single-command
     inner that exercises just the recursion.)
     """
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    paths = _extract_bash_paths('bash -c "cp /etc/passwd /tmp/leak"')
+    paths = extract_bash_paths('bash -c "cp /etc/passwd /tmp/leak"')
     assert "/etc/passwd" in paths
     assert "/tmp/leak" in paths
 
 
 def test_bash_paths_strips_leading_env_assignments() -> None:
     """`env`-style `VAR=value <shell> -c <inner>` still recognises the shell."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    assert "/etc/passwd" in _extract_bash_paths('FOO=1 bash -c "cat /etc/passwd"')
+    assert "/etc/passwd" in extract_bash_paths('FOO=1 bash -c "cat /etc/passwd"')
 
 
 def test_bash_paths_recurses_into_dash_c_equals_form() -> None:
     """`-c=<inner>` is accepted alongside the conventional `-c <inner>`."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    assert "/etc/passwd" in _extract_bash_paths('bash -c="cat /etc/passwd"')
+    assert "/etc/passwd" in extract_bash_paths('bash -c="cat /etc/passwd"')
 
 
 def test_bash_paths_handles_nested_shell_recursion() -> None:
     """`bash -c "bash -c '...'"` recurses to whatever depth the input nests."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    assert "/etc/passwd" in _extract_bash_paths("""bash -c "bash -c 'cat /etc/passwd'" """)
+    assert "/etc/passwd" in extract_bash_paths("""bash -c "bash -c 'cat /etc/passwd'" """)
 
 
 def test_bash_paths_non_shell_binary_no_recursion() -> None:
     """A leading binary that isn't a known shell does not trigger recursion;
     the outer tokens are still scanned by _extract_path_from_token."""
-    from redaction_hooks.hooks import _extract_bash_paths
+    from redaction_hooks.extractors import extract_bash_paths
 
-    paths = _extract_bash_paths("notashell -c 'cat /etc/passwd'")
+    paths = extract_bash_paths("notashell -c 'cat /etc/passwd'")
     # The inner `cat /etc/passwd` is opaque to the outer tokenizer, so the
     # entire string lands as one token (which still contains `/`, so it ends
     # up returned). The point of this test is that no recursion happens --
