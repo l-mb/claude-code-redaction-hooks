@@ -263,6 +263,7 @@ def _get_tool_input_content(tool_name: str, tool_input: dict[str, Any]) -> str |
       - Bash: command
       - Read: file_path
       - Grep / Glob: pattern (the regex / glob expression itself)
+      - ToolSearch: query (the deferred-tool discovery string)
       - Task / Agent: description + prompt joined (subagent gets both)
     """
     if tool_name in ("Write", "Edit", "MultiEdit"):
@@ -277,6 +278,9 @@ def _get_tool_input_content(tool_name: str, tool_input: dict[str, Any]) -> str |
     if tool_name in ("Grep", "Glob"):
         pattern = tool_input.get("pattern")
         return pattern if isinstance(pattern, str) else None
+    if tool_name == "ToolSearch":
+        query = tool_input.get("query")
+        return query if isinstance(query, str) else None
     if tool_name in ("Task", "Agent"):
         parts: list[str] = []
         for k in ("description", "prompt"):
@@ -311,6 +315,10 @@ def _iter_output_fields(tool_name: str, tool_response: Any) -> list[tuple[str, s
       - REPL:  {code, result, stdout, stderr}
       - Grep:  {filenames: [...], mode, numFiles}        # plus legacy {output, matches}
       - Glob:  similar to Grep
+      - Write: {type, filePath, content, structuredPatch, originalFile, userModified}
+      - Edit / MultiEdit: {filePath, oldString, newString, originalFile,
+                           structuredPatch: [{lines: [...]}], userModified, replaceAll}
+      - ToolSearch: {query, matches: [...], total_deferred_tools}
       - Task / Agent: {content, prompt, agentId, agentType, status, ...}
                       `content` may be a string or a list of message dicts.
     """
@@ -328,6 +336,17 @@ def _iter_output_fields(tool_name: str, tool_response: Any) -> list[tuple[str, s
         string_fields = ("content", "output")
     elif tool_name in ("Grep", "Glob"):
         string_fields = ("output",)
+    elif tool_name in ("Write", "Edit", "MultiEdit"):
+        # camelCase response shape (CC 2.1.x). `content` is present on Write,
+        # `originalFile` on Edit/MultiEdit and Write-over-existing. `oldString` /
+        # `newString` are echoed back from the input. All four are content-bearing
+        # and writable -- redact rewrites them in the response the model receives.
+        string_fields = ("content", "originalFile", "oldString", "newString")
+    elif tool_name == "ToolSearch":
+        # Deferred-tool discovery: `query` is the user-influenced search string;
+        # `matches[*]` is walked below for any string leaves (typically dicts
+        # describing tool schemas, but we accept either shape).
+        string_fields = ("query",)
     elif tool_name in ("Task", "Agent"):
         # `content` is sometimes a string (final assistant message) and sometimes
         # a list of message dicts -- handled below alongside the list-element case.
@@ -350,6 +369,32 @@ def _iter_output_fields(tool_name: str, tool_response: Any) -> list[tuple[str, s
                 for i, item in enumerate(list_val):
                     if isinstance(item, str) and item:
                         fields.append((f"{list_key}[{i}]", item))
+
+    if tool_name == "ToolSearch":
+        # `matches` here is a list of result entries. Empirically each entry is
+        # a dict describing a tool, but we also accept bare strings to stay
+        # robust to schema tweaks. Dict entries fall through to the recursive
+        # backstop -- their leaves are scan-only, not redactable.
+        matches = tool_response.get("matches")
+        if isinstance(matches, list):
+            for i, item in enumerate(matches):
+                if isinstance(item, str) and item:
+                    fields.append((f"matches[{i}]", item))
+
+    if tool_name in ("Edit", "MultiEdit"):
+        # `structuredPatch[*].lines[*]` is the diff text presented to the model.
+        # Walk it so leaked secrets in the surrounding context don't sneak past
+        # via the patch body.
+        patch = tool_response.get("structuredPatch")
+        if isinstance(patch, list):
+            for hi, hunk in enumerate(patch):
+                if not isinstance(hunk, dict):
+                    continue
+                lines = hunk.get("lines")
+                if isinstance(lines, list):
+                    for li, line in enumerate(lines):
+                        if isinstance(line, str) and line:
+                            fields.append((f"structuredPatch[{hi}].lines[{li}]", line))
 
     if tool_name in ("Task", "Agent"):
         # `content` as a list-of-messages: walk each message and grab its text.

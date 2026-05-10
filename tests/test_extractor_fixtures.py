@@ -49,10 +49,16 @@ def _load(name: str) -> dict[str, Any]:
 @pytest.mark.parametrize(
     ("fixture", "expected_paths", "expected_content_substr"),
     [
-        ("PreToolUse-Bash.json", [], "echo hello"),
-        ("PreToolUse-Read.json", ["<HOME>/<PROJECT>/README.md"], None),
-        ("PreToolUse-Grep.json", ["<HOME>/<PROJECT>"], "rules"),
-        ("PreToolUse-Agent.json", [], "List the files"),
+        # Substrings reference the harness's `redact-verify` canary -- stable
+        # across re-runs of `redact verify-cc-schema --update-golden`.
+        ("PreToolUse-Bash.json", [], "<PROJECT>"),
+        ("PreToolUse-Read.json", ["<PROJECT>/multi.txt"], None),
+        ("PreToolUse-Grep.json", ["README.md"], "rules"),
+        ("PreToolUse-Agent.json", [], "list cwd files"),
+        ("PreToolUse-Edit.json", ["<PROJECT>/note.txt"], "redact-verify"),
+        ("PreToolUse-Write.json", ["<PROJECT>/out.txt"], "redact-verify"),
+        ("PreToolUse-Glob.json", [], "*.md"),
+        ("PreToolUse-ToolSearch.json", [], "select:"),
     ],
 )
 def test_pre_tool_use_extractor_recognises_payload(
@@ -63,8 +69,9 @@ def test_pre_tool_use_extractor_recognises_payload(
     """PreToolUse extractor returns non-empty content for every known shape.
 
     Bash → command, Read → file_path, Grep → pattern + path,
-    Agent → description + prompt. If any of these names moves, this fails
-    before the handler silently misses content in production.
+    Agent → description + prompt, Edit/Write → file_path + content/new_string,
+    Glob → pattern, ToolSearch → query. If any of these names moves, this
+    fails before the handler silently misses content in production.
     """
     data = _load(fixture)
     tool_name = data["tool_name"]
@@ -88,10 +95,20 @@ def test_pre_tool_use_extractor_recognises_payload(
 @pytest.mark.parametrize(
     ("fixture", "must_match_field_substr"),
     [
-        ("PostToolUse-Bash.json", ("stdout", "hello")),
-        ("PostToolUse-Read.json", ("file.content", "First paragraph")),
+        # Bash stdout content is whatever the most-recent harness Bash capture
+        # produced -- presently the subagent's `ls <PROJECT>` listing -- so we
+        # assert on a substring guaranteed to appear in any directory listing of
+        # the seeded harness project.
+        ("PostToolUse-Bash.json", ("stdout", "README.md")),
+        ("PostToolUse-Read.json", ("file.content", "redact-verify")),
         ("PostToolUse-REPL.json", ("result", "2")),
         ("PostToolUse-Grep.json", ("filenames[0]", "README.md")),
+        ("PostToolUse-Glob.json", ("filenames[0]", "README.md")),
+        ("PostToolUse-Write.json", ("content", "redact-verify")),
+        # Edit response has no `content` key; `originalFile` carries the pre-image.
+        ("PostToolUse-Edit.json", ("originalFile", "redact-verify")),
+        # ToolSearch response: `query` echoes the input query string.
+        ("PostToolUse-ToolSearch.json", ("query", "select:")),
         ("PostToolUse-Agent.json", ("content[0].text", "DONE")),
     ],
 )

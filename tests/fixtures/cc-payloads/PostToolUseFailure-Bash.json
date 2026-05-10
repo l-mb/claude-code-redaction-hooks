@@ -1,6 +1,6 @@
 {
   "session_id": "<SESSION>",
-  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-8vau66yc-project/<SESSION>.jsonl",
+  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-on3wraas-project/<SESSION>.jsonl",
   "cwd": "<PROJECT>",
   "permission_mode": "bypassPermissions",
   "effort": {
@@ -10,10 +10,10 @@
   "tool_name": "Bash",
   "tool_input": {
     "command": "ls /no-such-path-redact-verify",
-    "description": "List nonexistent path"
+    "description": "List non-existent path"
   },
   "tool_use_id": "<TOOL_USE>",
   "error": "Exit code 2\nls: cannot access '/no-such-path-redact-verify': No such file or directory",
   "is_interrupt": false,
-  "duration_ms": 35
+  "duration_ms": 41
 }

@@ -96,15 +96,22 @@ SCENARIOS: tuple[Scenario, ...] = (
         ),
         max_turns=3,
     ),
+    # In CC 2.1.138 MultiEdit is a *deferred* tool: the model has to call
+    # ToolSearch before it becomes invocable. Our prompt therefore reliably
+    # produces a ToolSearch capture (which we want for coverage); whether
+    # MultiEdit itself fires depends on whether ToolSearch finds it. If it
+    # doesn't, the model falls back to two Edit calls, so we still exercise
+    # the Edit path. Bumped to max_turns=4 to give room for ToolSearch +
+    # Read + edit(s) + final reply.
     Scenario(
-        "multiedit",
+        "multiedit-deferred",
         (
             "Use the MultiEdit tool on `multi.txt` with two edits: replace "
             "`alpha-from-redact-verify` with `ALPHA-from-redact-verify`, then "
             "replace `beta-from-redact-verify` with `BETA-from-redact-verify`. "
             "Reply only DONE."
         ),
-        max_turns=3,
+        max_turns=4,
     ),
     Scenario(
         "task-subagent",

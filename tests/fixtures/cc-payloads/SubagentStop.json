@@ -1,15 +1,15 @@
 {
   "session_id": "<SESSION>",
-  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-8vau66yc-project/<SESSION>.jsonl",
+  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-on3wraas-project/<SESSION>.jsonl",
   "cwd": "<PROJECT>",
   "permission_mode": "bypassPermissions",
-  "agent_id": "ace30f760bf1d3f60",
+  "agent_id": "a89fd5207b39e1f0d",
   "agent_type": "general-purpose",
   "effort": {
     "level": "high"
   },
   "hook_event_name": "SubagentStop",
   "stop_hook_active": false,
-  "agent_transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-8vau66yc-project/<SESSION>/subagents/agent-ace30f760bf1d3f60.jsonl",
-  "last_assistant_message": "README.md, multi.txt, note.txt, out.txt\n\nDONE"
+  "agent_transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-on3wraas-project/<SESSION>/subagents/agent-a89fd5207b39e1f0d.jsonl",
+  "last_assistant_message": "DONE\n\nFiles: README.md, multi.txt, note.txt, out.txt"
 }

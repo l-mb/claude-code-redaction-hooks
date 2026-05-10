@@ -1,6 +1,6 @@
 {
   "session_id": "<SESSION>",
-  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-8vau66yc-project/<SESSION>.jsonl",
+  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-on3wraas-project/<SESSION>.jsonl",
   "cwd": "<PROJECT>",
   "permission_mode": "bypassPermissions",
   "effort": {
@@ -9,7 +9,7 @@
   "hook_event_name": "PreToolUse",
   "tool_name": "Read",
   "tool_input": {
-    "file_path": "<PROJECT>/multi.txt"
+    "file_path": "<PROJECT>/note.txt"
   },
   "tool_use_id": "<TOOL_USE>"
 }

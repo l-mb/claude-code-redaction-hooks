@@ -1,6 +1,6 @@
 {
   "session_id": "<SESSION>",
-  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-8vau66yc-project/<SESSION>.jsonl",
+  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-on3wraas-project/<SESSION>.jsonl",
   "cwd": "<PROJECT>",
   "permission_mode": "bypassPermissions",
   "effort": {
@@ -9,16 +9,16 @@
   "hook_event_name": "PostToolUse",
   "tool_name": "Read",
   "tool_input": {
-    "file_path": "<PROJECT>/multi.txt"
+    "file_path": "<PROJECT>/note.txt"
   },
   "tool_response": {
     "type": "text",
     "file": {
-      "filePath": "<PROJECT>/multi.txt",
-      "content": "alpha-from-redact-verify\nbeta-from-redact-verify\n",
-      "numLines": 3,
+      "filePath": "<PROJECT>/note.txt",
+      "content": "hello-from-redact-verify\n",
+      "numLines": 2,
       "startLine": 1,
-      "totalLines": 3
+      "totalLines": 2
     }
   },
   "tool_use_id": "<TOOL_USE>",

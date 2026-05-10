@@ -1,6 +1,6 @@
 {
   "session_id": "<SESSION>",
-  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-8vau66yc-project/<SESSION>.jsonl",
+  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-on3wraas-project/<SESSION>.jsonl",
   "cwd": "<PROJECT>",
   "hook_event_name": "InstructionsLoaded",
   "file_path": "<HOME>/.claude/CLAUDE.md",
