@@ -48,7 +48,7 @@ def regex_timeout(seconds: int) -> Iterator[None]:
         yield
         return
 
-    def _handler(signum: int, frame: object) -> None:
+    def _handler(_signum: int, _frame: object) -> None:
         raise RegexTimeoutError
 
     old_handler = signal.signal(signal.SIGALRM, _handler)
