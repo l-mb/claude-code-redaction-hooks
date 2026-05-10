@@ -879,7 +879,7 @@ def handle_user_prompt_submit(data: dict[str, Any], project_dir: Path | None = N
     if redact_matches:
         ids = sorted({m.rule.id for m in redact_matches})
         sys.stderr.write(f"Warning: redact rules {ids} cannot modify prompts\n")
-        _audit("UserPromptSubmit", "redact", redact_matches, project_dir=project_dir)
+        _audit("UserPromptSubmit", "redact-skipped", redact_matches, project_dir=project_dir)
         redact_response: dict[str, Any] = {
             "continue": True,
             "hookSpecificOutput": {
@@ -1029,10 +1029,11 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
     if not redacted_fields:
         # Redact rules may have matched but produced no text change (e.g. mapping
         # collision producing same string), or there were no redact matches at all.
+        # Either way the tool_response was NOT rewritten -- log redact-skipped.
         if writable_redact:
             _audit(
                 "PostToolUse",
-                "redact",
+                "redact-skipped",
                 writable_redact,
                 tool=tool_name,
                 tool_use_id=tool_use_id,
@@ -1045,7 +1046,7 @@ def handle_post_tool_use(data: dict[str, Any], project_dir: Path | None = None) 
         sys.stderr.write(f"Warning: cannot redact non-dict tool_response for {tool_name}\n")
         _audit(
             "PostToolUse",
-            "redact",
+            "redact-skipped",
             writable_redact,
             tool=tool_name,
             tool_use_id=tool_use_id,
@@ -1132,12 +1133,18 @@ def handle_post_tool_use_failure(data: dict[str, Any], project_dir: Path | None 
     sys.stderr.write(
         f"PostToolUseFailure warning: rules {rule_ids} matched in failed {tool_name} call\n"
     )
-    for action in ("warn", "block", "redact"):
-        action_matches = [m for m in all_matches if m.rule.action == action]
+    # Observe-only event: a redact-action match cannot rewrite the (already
+    # failed) call, so audit it as redact-skipped per the README contract.
+    for rule_action, audit_action in (
+        ("warn", "warn"),
+        ("block", "block"),
+        ("redact", "redact-skipped"),
+    ):
+        action_matches = [m for m in all_matches if m.rule.action == rule_action]
         if action_matches:
             _audit(
                 "PostToolUseFailure",
-                action,
+                audit_action,
                 action_matches,
                 tool=tool_name,
                 tool_use_id=tool_use_id,
@@ -1214,10 +1221,16 @@ def handle_instructions_loaded(data: dict[str, Any], project_dir: Path | None = 
         f"InstructionsLoaded warning: rules {rule_ids} matched in {memory_type} "
         f"file {file_path} (load_reason={load_reason})\n"
     )
-    for action in ("warn", "block", "redact"):
-        action_matches = [m for m in matches if m.rule.action == action]
+    # Observe-only event: redact-action match cannot rewrite a memory file
+    # already loaded by CC. Surface as redact-skipped per the README contract.
+    for rule_action, audit_action in (
+        ("warn", "warn"),
+        ("block", "block"),
+        ("redact", "redact-skipped"),
+    ):
+        action_matches = [m for m in matches if m.rule.action == rule_action]
         if action_matches:
-            _audit("InstructionsLoaded", action, action_matches, project_dir=project_dir)
+            _audit("InstructionsLoaded", audit_action, action_matches, project_dir=project_dir)
 
     json.dump({"continue": True}, sys.stdout)
     return 0
@@ -1311,10 +1324,16 @@ def handle_stop(data: dict[str, Any], project_dir: Path | None = None) -> int:
 
     rule_ids = sorted({m.rule.id for m in matches})
     sys.stderr.write(f"{hook_event} warning: rules {rule_ids} matched in last assistant message\n")
-    for action in ("warn", "block", "redact"):
-        action_matches = [m for m in matches if m.rule.action == action]
+    # Observe-only event: the message is already on the wire; redact cannot
+    # un-send it. Audit redact-action matches as redact-skipped per the README.
+    for rule_action, audit_action in (
+        ("warn", "warn"),
+        ("block", "block"),
+        ("redact", "redact-skipped"),
+    ):
+        action_matches = [m for m in matches if m.rule.action == rule_action]
         if action_matches:
-            _audit(hook_event, action, action_matches, project_dir=project_dir)
+            _audit(hook_event, audit_action, action_matches, project_dir=project_dir)
     json.dump({"continue": True}, sys.stdout)
     return 0
 
@@ -1404,7 +1423,7 @@ def handle_pre_compact(data: dict[str, Any], project_dir: Path | None = None) ->
             f"PreCompact warning: redact rules {ids} matched but cannot rewrite "
             "the compacted summary; consider blocking instead\n"
         )
-        _audit("PreCompact", "redact", redact_matches, project_dir=project_dir)
+        _audit("PreCompact", "redact-skipped", redact_matches, project_dir=project_dir)
 
     if block_matches:
         ids = sorted({m.rule.id for m in block_matches})
@@ -1461,10 +1480,16 @@ def handle_post_compact(data: dict[str, Any], project_dir: Path | None = None) -
         f"PostCompact warning: rules {rule_ids} matched in compacted transcript "
         f"(trigger={trigger})\n"
     )
-    for action in ("warn", "block", "redact"):
-        action_matches = [m for m in all_matches if m.rule.action == action]
+    # Observe-only event: compaction has already produced the summary; redact
+    # cannot rewrite it. Surface as redact-skipped per the README contract.
+    for rule_action, audit_action in (
+        ("warn", "warn"),
+        ("block", "block"),
+        ("redact", "redact-skipped"),
+    ):
+        action_matches = [m for m in all_matches if m.rule.action == rule_action]
         if action_matches:
-            _audit("PostCompact", action, action_matches, project_dir=project_dir)
+            _audit("PostCompact", audit_action, action_matches, project_dir=project_dir)
 
     json.dump({"continue": True}, sys.stdout)
     return 0

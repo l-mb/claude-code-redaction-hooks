@@ -1915,7 +1915,7 @@ rules:
     assert output == {"continue": True}
     assert "redact rules" in stderr.getvalue()
     entries = read_entries(tmp_path)
-    redacts = [e for e in entries if e["hook"] == "PreCompact" and e["action"] == "redact"]
+    redacts = [e for e in entries if e["hook"] == "PreCompact" and e["action"] == "redact-skipped"]
     assert redacts
 
 
