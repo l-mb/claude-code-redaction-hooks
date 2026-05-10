@@ -1,14 +1,16 @@
 {
   "session_id": "<SESSION>",
-  "transcript_path": "<HOME>/.claude/projects/-<PROJECT>/<SESSION>.jsonl",
-  "cwd": "<HOME>/<PROJECT>",
-  "permission_mode": "auto",
-  "effort": {"level": "high"},
+  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-8vau66yc-project/<SESSION>.jsonl",
+  "cwd": "<PROJECT>",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "high"
+  },
   "hook_event_name": "PreToolUse",
   "tool_name": "Grep",
   "tool_input": {
     "pattern": "rules",
-    "path": "<HOME>/<PROJECT>"
+    "path": "README.md"
   },
   "tool_use_id": "<TOOL_USE>"
 }

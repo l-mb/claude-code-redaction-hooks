@@ -1,30 +1,72 @@
 {
   "session_id": "<SESSION>",
-  "transcript_path": "<HOME>/.claude/projects/-<PROJECT>/<SESSION>.jsonl",
-  "cwd": "<HOME>/<PROJECT>",
-  "permission_mode": "auto",
-  "effort": {"level": "high"},
+  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-8vau66yc-project/<SESSION>.jsonl",
+  "cwd": "<PROJECT>",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "high"
+  },
   "hook_event_name": "PostToolUse",
   "tool_name": "Agent",
   "tool_input": {
     "description": "List cwd files",
-    "prompt": "List the files in the current working directory and reply DONE.",
+    "prompt": "list cwd files and reply DONE",
     "subagent_type": "general-purpose"
   },
   "tool_response": {
-    "agentId": "<TOOL_USE>",
+    "status": "completed",
+    "prompt": "list cwd files and reply DONE",
+    "agentId": "ace30f760bf1d3f60",
     "agentType": "general-purpose",
     "content": [
-      {"type": "text", "text": "Files: README.md, .redaction_rules\nDONE"}
+      {
+        "type": "text",
+        "text": "README.md, multi.txt, note.txt, out.txt\n\nDONE"
+      }
     ],
-    "prompt": "List the files in the current working directory and reply DONE.",
-    "status": "completed",
-    "toolStats": {"Bash": 1},
-    "totalDurationMs": 1234,
-    "totalTokens": 567,
+    "totalDurationMs": 4792,
+    "totalTokens": 16336,
     "totalToolUseCount": 1,
-    "usage": {"input_tokens": 100, "output_tokens": 50}
+    "usage": {
+      "input_tokens": 1,
+      "cache_creation_input_tokens": 146,
+      "cache_read_input_tokens": 16162,
+      "output_tokens": 27,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 146
+      },
+      "inference_geo": "",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 27,
+          "cache_read_input_tokens": 16162,
+          "cache_creation_input_tokens": 146,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 146,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "toolStats": {
+      "readCount": 0,
+      "searchCount": 0,
+      "bashCount": 1,
+      "editFileCount": 0,
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "otherToolCount": 0
+    }
   },
   "tool_use_id": "<TOOL_USE>",
-  "duration_ms": 21000
+  "duration_ms": 4792
 }

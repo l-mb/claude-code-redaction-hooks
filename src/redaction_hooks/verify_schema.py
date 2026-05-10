@@ -73,6 +73,40 @@ SCENARIOS: tuple[Scenario, ...] = (
         max_turns=2,
     ),
     Scenario(
+        "glob",
+        "Use the Glob tool with pattern '*.md'. Reply only DONE.",
+        max_turns=2,
+    ),
+    Scenario(
+        "write",
+        (
+            "Use the Write tool to create file `out.txt` with the single line "
+            "`hello-from-redact-verify`. Reply only DONE."
+        ),
+        max_turns=2,
+    ),
+    # Edit/MultiEdit require the file to be Read first in-session, so each of
+    # these scenarios also exercises PreToolUse/PostToolUse for Read -- bonus
+    # coverage at no extra cost.
+    Scenario(
+        "edit",
+        (
+            "Use the Edit tool on `note.txt` to replace the exact string "
+            "`hello-from-redact-verify` with `world-from-redact-verify`. Reply only DONE."
+        ),
+        max_turns=3,
+    ),
+    Scenario(
+        "multiedit",
+        (
+            "Use the MultiEdit tool on `multi.txt` with two edits: replace "
+            "`alpha-from-redact-verify` with `ALPHA-from-redact-verify`, then "
+            "replace `beta-from-redact-verify` with `BETA-from-redact-verify`. "
+            "Reply only DONE."
+        ),
+        max_turns=3,
+    ),
+    Scenario(
         "task-subagent",
         (
             "Use the Task tool to delegate the prompt 'list cwd files and reply DONE' "
@@ -145,6 +179,12 @@ def setup_tmp_project(parent: Path) -> Path:
     }
     (proj / ".claude" / "settings.json").write_text(json.dumps(settings, indent=2))
     (proj / "README.md").write_text("# Sample\n\nSome text mentioning rules so grep has a hit.\n")
+    # Seed files for the edit / multiedit scenarios. Each scenario is
+    # self-contained: never relies on a prior scenario's mutations.
+    (proj / "note.txt").write_text("hello-from-redact-verify\n")
+    (proj / "multi.txt").write_text(
+        "alpha-from-redact-verify\nbeta-from-redact-verify\n",
+    )
     return proj
 
 
@@ -233,6 +273,13 @@ def classify_capture(
 # checked directly in REQUIRED_KEYS_BY_EVENT below.
 _EXTRACTOR_EVENTS = frozenset({"PreToolUse", "PostToolUse", "PostToolUseFailure"})
 
+# Top-level keys CC attaches to *any* hook fired inside a subagent (Task tool).
+# Their presence/absence is a function of execution context, not schema, so
+# filter them out of the corpus-vs-payload diff -- otherwise every subagent-side
+# Bash/Read/Grep/etc. capture would flag spurious drift against the
+# non-subagent corpus fixtures.
+_SUBAGENT_CONTEXT_KEYS = frozenset({"agent_id", "agent_type"})
+
 # For every non-extractor event, name the top-level keys the handler walks.
 # Order matters: the first match wins (so e.g. Stop prefers the inline
 # `last_assistant_message` and falls back to `transcript_path`).
@@ -295,8 +342,10 @@ def classify_payload(
         extractor_returned_nothing = not any(payload.get(k) for k in required)
 
     golden_keys = golden.get((event, tool_name), set())
-    new_keys = sorted(set(top_keys) - golden_keys) if golden_keys else []
-    missing_keys = sorted(golden_keys - set(top_keys)) if golden_keys else []
+    new_keys = sorted(set(top_keys) - golden_keys - _SUBAGENT_CONTEXT_KEYS) if golden_keys else []
+    missing_keys = (
+        sorted(golden_keys - set(top_keys) - _SUBAGENT_CONTEXT_KEYS) if golden_keys else []
+    )
     drift = {
         "extractor_returned_nothing": extractor_returned_nothing,
         "new_top_level_keys_vs_corpus": new_keys,

@@ -96,6 +96,36 @@ def test_classify_payload_diffs_top_level_keys_against_golden() -> None:
     assert "duration_ms" in cap.drift["missing_top_level_keys_vs_corpus"]
 
 
+def test_classify_payload_ignores_subagent_context_keys_in_drift() -> None:
+    """`agent_id` / `agent_type` are decoration CC adds to every hook fired
+    inside a subagent (Task tool). They appear regardless of (event, tool),
+    so the diff against the non-subagent corpus must NOT flag them as drift
+    -- otherwise every subagent-side capture produces noise."""
+    payload = _bash_post_payload()
+    payload["agent_id"] = "subagent-1"
+    payload["agent_type"] = "general-purpose"
+    golden: dict[tuple[str, str | None], set[str]] = {
+        ("PostToolUse", "Bash"): set(_bash_post_payload().keys())
+    }
+    cap = classify_payload(payload, "fake.json", golden=golden)
+    assert cap.drift["new_top_level_keys_vs_corpus"] == []
+    assert cap.drift["missing_top_level_keys_vs_corpus"] == []
+    # The keys are still present in top_level_keys (visibility preserved).
+    assert "agent_id" in cap.top_level_keys
+    assert "agent_type" in cap.top_level_keys
+
+
+def test_classify_payload_subagent_context_filter_works_in_reverse() -> None:
+    """Symmetric case: a corpus that *did* carry agent_id/agent_type (e.g.
+    SubagentStop) must not flag them as missing when a payload omits them."""
+    payload = _bash_post_payload()
+    golden: dict[tuple[str, str | None], set[str]] = {
+        ("PostToolUse", "Bash"): set(_bash_post_payload().keys()) | {"agent_id", "agent_type"}
+    }
+    cap = classify_payload(payload, "fake.json", golden=golden)
+    assert cap.drift["missing_top_level_keys_vs_corpus"] == []
+
+
 def test_classify_payload_does_not_flag_drift_for_non_extractor_events() -> None:
     """InstructionsLoaded / UserPromptSubmit / Stop / *Compact handlers don't
     use the per-tool extractors. The classifier must NOT flag them as drift
@@ -231,10 +261,17 @@ def test_emit_report_md_lists_drift_section_when_present() -> None:
 
 
 def test_setup_tmp_project_writes_settings_and_rules(tmp_path: Path) -> None:
-    """Tmp project carries .redaction_rules, .claude/settings.json, README seed."""
+    """Tmp project carries .redaction_rules, .claude/settings.json, README seed
+    plus the note.txt / multi.txt seeds for the edit / multiedit scenarios."""
     proj = setup_tmp_project(tmp_path)
     assert (proj / ".redaction_rules").exists()
     assert (proj / "README.md").exists()
+    # Seed files for the edit / multiedit scenarios -- each must contain the
+    # exact substring the scenario prompt asks the model to replace.
+    assert "hello-from-redact-verify" in (proj / "note.txt").read_text()
+    multi_content = (proj / "multi.txt").read_text()
+    assert "alpha-from-redact-verify" in multi_content
+    assert "beta-from-redact-verify" in multi_content
     settings = json.loads((proj / ".claude" / "settings.json").read_text())
     # All events from the installer are registered, with `redact hook` and no matcher.
     assert "PreToolUse" in settings["hooks"]

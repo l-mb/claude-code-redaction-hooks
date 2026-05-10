@@ -7,11 +7,9 @@
     "level": "high"
   },
   "hook_event_name": "PreToolUse",
-  "tool_name": "Agent",
+  "tool_name": "Glob",
   "tool_input": {
-    "description": "List cwd files",
-    "prompt": "list cwd files and reply DONE",
-    "subagent_type": "general-purpose"
+    "pattern": "*.md"
   },
   "tool_use_id": "<TOOL_USE>"
 }

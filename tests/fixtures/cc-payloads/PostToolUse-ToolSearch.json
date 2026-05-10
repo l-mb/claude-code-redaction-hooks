@@ -7,18 +7,16 @@
     "level": "high"
   },
   "hook_event_name": "PostToolUse",
-  "tool_name": "Grep",
+  "tool_name": "ToolSearch",
   "tool_input": {
-    "pattern": "rules",
-    "path": "README.md"
+    "query": "select:MultiEdit",
+    "max_results": 1
   },
   "tool_response": {
-    "mode": "files_with_matches",
-    "filenames": [
-      "README.md"
-    ],
-    "numFiles": 1
+    "matches": [],
+    "query": "select:MultiEdit",
+    "total_deferred_tools": 26
   },
   "tool_use_id": "<TOOL_USE>",
-  "duration_ms": 6
+  "duration_ms": 2
 }

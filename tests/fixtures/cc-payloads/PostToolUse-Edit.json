@@ -1,0 +1,39 @@
+{
+  "session_id": "<SESSION>",
+  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-8vau66yc-project/<SESSION>.jsonl",
+  "cwd": "<PROJECT>",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "<PROJECT>/note.txt",
+    "old_string": "hello-from-redact-verify",
+    "new_string": "world-from-redact-verify",
+    "replace_all": false
+  },
+  "tool_response": {
+    "filePath": "<PROJECT>/note.txt",
+    "oldString": "hello-from-redact-verify",
+    "newString": "world-from-redact-verify",
+    "originalFile": "hello-from-redact-verify\n",
+    "structuredPatch": [
+      {
+        "oldStart": 1,
+        "oldLines": 1,
+        "newStart": 1,
+        "newLines": 1,
+        "lines": [
+          "-hello-from-redact-verify",
+          "+world-from-redact-verify"
+        ]
+      }
+    ],
+    "userModified": false,
+    "replaceAll": false
+  },
+  "tool_use_id": "<TOOL_USE>",
+  "duration_ms": 3
+}

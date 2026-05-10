@@ -1,17 +1,19 @@
 {
   "session_id": "<SESSION>",
-  "transcript_path": "<HOME>/.claude/projects/-<PROJECT>/<SESSION>.jsonl",
-  "cwd": "<HOME>/<PROJECT>",
-  "permission_mode": "auto",
-  "effort": {"level": "high"},
+  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-8vau66yc-project/<SESSION>.jsonl",
+  "cwd": "<PROJECT>",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "high"
+  },
   "hook_event_name": "PostToolUseFailure",
   "tool_name": "Bash",
   "tool_input": {
-    "command": "ls /nonexistent-path-file",
-    "description": "List nonexistent path to trigger failure"
+    "command": "ls /no-such-path-redact-verify",
+    "description": "List nonexistent path"
   },
   "tool_use_id": "<TOOL_USE>",
-  "error": "Exit code 2\nls: cannot access '/nonexistent-path-file': No such file or directory",
+  "error": "Exit code 2\nls: cannot access '/no-such-path-redact-verify': No such file or directory",
   "is_interrupt": false,
-  "duration_ms": 38
+  "duration_ms": 35
 }

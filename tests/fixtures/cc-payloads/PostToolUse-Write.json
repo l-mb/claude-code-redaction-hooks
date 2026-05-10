@@ -7,18 +7,19 @@
     "level": "high"
   },
   "hook_event_name": "PostToolUse",
-  "tool_name": "Grep",
+  "tool_name": "Write",
   "tool_input": {
-    "pattern": "rules",
-    "path": "README.md"
+    "file_path": "<PROJECT>/out.txt",
+    "content": "hello-from-redact-verify\n"
   },
   "tool_response": {
-    "mode": "files_with_matches",
-    "filenames": [
-      "README.md"
-    ],
-    "numFiles": 1
+    "type": "create",
+    "filePath": "<PROJECT>/out.txt",
+    "content": "hello-from-redact-verify\n",
+    "structuredPatch": [],
+    "originalFile": null,
+    "userModified": false
   },
   "tool_use_id": "<TOOL_USE>",
-  "duration_ms": 6
+  "duration_ms": 3
 }
