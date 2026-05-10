@@ -14,4 +14,4 @@
 
 """Claude Code redaction hooks for preventing secrets and PII leakage."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
