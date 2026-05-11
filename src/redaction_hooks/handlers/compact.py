@@ -30,7 +30,7 @@ from ..drift import audit_missing_key
 from ..extractors import walk_strings
 from ..matcher import PatternMatcher
 from ..models import Match
-from ._common import audit_matches, audit_timeouts
+from ._common import audit_matches, audit_timeouts, build_decision_block_response
 
 
 def _scan_transcript(
@@ -121,16 +121,11 @@ def handle_pre_compact(data: dict[str, Any], project_dir: Path | None = None) ->
     if block_matches:
         ids = sorted({m.rule.id for m in block_matches})
         audit_matches("PreCompact", "block", block_matches, project_dir=project_dir)
-        response = {
-            "decision": "block",
-            "reason": (
-                f"Compaction blocked: rules {ids} matched in transcript (trigger={trigger})"
-            ),
-            "hookSpecificOutput": {"hookEventName": "PreCompact"},
-        }
-        json.dump(response, sys.stdout)
+        reason = f"rules {ids} matched in transcript (trigger={trigger})"
+        json.dump(build_decision_block_response("PreCompact", [reason]), sys.stdout)
         sys.stderr.write(f"PreCompact blocked: rules {ids} matched\n")
-        return 2
+        # exit 0 + JSON: see user_prompt_submit.py for the rationale.
+        return 0
 
     json.dump({"continue": True}, sys.stdout)
     return 0

@@ -423,7 +423,7 @@ rules:
         "tool_input": {"content": "AKIAIOSFODNN7EXAMPLE", "file_path": "x.py"},
     }
     code, out, err = run_cli("hook", stdin_text=json.dumps(data))
-    assert code == 2  # rule fired despite cwd containing no rules
+    assert code == 0  # rule fired despite cwd containing no rules
     audit = real_project / ".claude" / "redaction_audit.log"
     assert audit.exists(), "audit log should land in CLAUDE_PROJECT_DIR"
 
@@ -446,7 +446,7 @@ rules:
         "tool_input": {"content": "AKIAIOSFODNN7EXAMPLE", "file_path": "x.py"},
     }
     code, out, err = run_cli("hook", stdin_text=json.dumps(data))
-    assert code == 2  # cwd's rules are loaded after the fallback
+    assert code == 0  # cwd's rules are loaded after the fallback
     assert "is not a directory" in err
     audit = tmp_path / ".claude" / "redaction_audit.log"
     assert audit.exists(), "audit log should land in cwd after invalid env fallback"
@@ -470,7 +470,7 @@ rules:
         "tool_input": {"content": "AKIAIOSFODNN7EXAMPLE", "file_path": "x.py"},
     }
     code, _, _ = run_cli("hook", stdin_text=json.dumps(data))
-    assert code == 2
+    assert code == 0
     audit = tmp_path / ".claude" / "redaction_audit.log"
     assert audit.exists(), "audit log must land in cwd, not the user-global path"
 

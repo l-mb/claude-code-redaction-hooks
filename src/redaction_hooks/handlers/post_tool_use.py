@@ -118,6 +118,13 @@ def _emit_block(
     }
     json.dump(response, sys.stdout)
     sys.stderr.write(f"Tool output blocked: {'; '.join(state.block_reasons)}\n")
+    # PostToolUse intentionally stays on exit 2 (does NOT use the
+    # `continue: false` halt path that PreToolUse / UserPromptSubmit /
+    # PreCompact use). The tool has already executed by the time
+    # PostToolUse fires; halting the session would only delay the next
+    # turn -- it cannot un-ship the leaked content. The exit-2 path
+    # feeds the stderr error back to the model so it knows the output
+    # was withheld, then lets it react.
     return 2
 
 

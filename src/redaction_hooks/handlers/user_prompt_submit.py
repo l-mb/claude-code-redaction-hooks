@@ -31,7 +31,7 @@ from ..actions import apply_actions
 from ..config import load_rules
 from ..drift import audit_missing_key
 from ..matcher import PatternMatcher
-from ._common import audit_matches, audit_timeouts, emit_warnings
+from ._common import audit_matches, audit_timeouts, build_decision_block_response, emit_warnings
 
 
 def handle_user_prompt_submit(data: dict[str, Any], project_dir: Path | None = None) -> int:
@@ -77,16 +77,14 @@ def handle_user_prompt_submit(data: dict[str, Any], project_dir: Path | None = N
             [m for m in matches if m.rule.action == "block"],
             project_dir=project_dir,
         )
-        response = {
-            "decision": "block",
-            "reason": f"Prompt blocked: {'; '.join(result.block_reasons)}",
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-            },
-        }
-        json.dump(response, sys.stdout)
+        json.dump(
+            build_decision_block_response("UserPromptSubmit", result.block_reasons), sys.stdout
+        )
         sys.stderr.write(f"Prompt blocked: {'; '.join(result.block_reasons)}\n")
-        return 2
+        # exit 0 + JSON: CC honors `decision: "block"` (rejects the prompt) AND
+        # `continue: false` (halts the rest of the session). exit 2 would drop
+        # the JSON per docs and just feed stderr to Claude on the next turn.
+        return 0
 
     # UserPromptSubmit doesn't support updatedInput, so we cannot rewrite the
     # prompt -- but we can inject `additionalContext` so the model is aware that

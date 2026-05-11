@@ -65,7 +65,7 @@ def test_pre_tool_use_blocks_aws_key(rules_dir: Path) -> None:
         "tool_input": {"content": "aws_key = AKIAIOSFODNN7EXAMPLE", "file_path": "config.py"},
     }
     code, output = capture_output(handle_pre_tool_use, data, rules_dir)
-    assert code == 2
+    assert code == 0
     assert output["continue"] is False
     assert "deny" in output["hookSpecificOutput"]["permissionDecision"]
 
@@ -78,7 +78,7 @@ def test_pre_tool_use_blocks_bash_command(rules_dir: Path) -> None:
         "tool_input": {"command": "export AWS_KEY=AKIAIOSFODNN7EXAMPLE"},
     }
     code, output = capture_output(handle_pre_tool_use, data, rules_dir)
-    assert code == 2
+    assert code == 0
     assert output["continue"] is False
 
 
@@ -120,7 +120,7 @@ def test_user_prompt_blocks_secret(rules_dir: Path) -> None:
         "prompt": "Use this key: AKIAIOSFODNN7EXAMPLE",
     }
     code, output = capture_output(handle_user_prompt_submit, data, rules_dir)
-    assert code == 2
+    assert code == 0
     assert output["decision"] == "block"
 
 
@@ -389,7 +389,7 @@ rules:
         "tool_input": {"pattern": "AKIAIOSFODNN7EXAMPLE", "path": "/tmp"},
     }
     code, _ = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
 
 
 def test_pre_tool_use_blocks_agent_prompt(tmp_path: Path) -> None:
@@ -411,7 +411,7 @@ rules:
         },
     }
     code, _ = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
 
 
 def test_post_tool_use_blocks_agent_content_list(tmp_path: Path) -> None:
@@ -988,7 +988,7 @@ rules:
     stderr = io.StringIO()
     with patch.object(sys, "stderr", stderr):
         code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
     assert output["continue"] is False
     err = stderr.getvalue()
     assert "schema-drift" in err
@@ -1277,7 +1277,7 @@ rules:
         "tool_input": {"command": "git commit --no-verify"},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
     assert output["continue"] is False
 
     # Write with --no-verify in content: allowed (wrong tool)
@@ -1330,7 +1330,7 @@ rules:
         "tool_input": {"file_path": "/home/user/.env"},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
     assert output["continue"] is False
     assert "block-env" in output["hookSpecificOutput"]["permissionDecisionReason"]
 
@@ -1370,7 +1370,7 @@ rules:
         "tool_input": {"content": "AWS_KEY=AKIAIOSFODNN7EXAMPLE", "file_path": "config.env"},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
     assert output["continue"] is False
 
     # AWS key in non-.env file: allowed (path doesn't match)
@@ -1410,7 +1410,7 @@ rules:
         "tool_input": {"command": "cat /etc/passwd"},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
     assert output["continue"] is False
 
 
@@ -1432,7 +1432,7 @@ rules:
         "tool_input": {"command": "rm -rf /home/user/data"},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
 
     # rm -rf on /tmp path: allowed (different path)
     data = {
@@ -1569,7 +1569,7 @@ rules:
         "tool_input": {"file_path": str(target)},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
     assert output["continue"] is False
     assert "block-proprietary" in output["hookSpecificOutput"]["permissionDecisionReason"]
 
@@ -1614,7 +1614,7 @@ rules:
         "tool_input": {"file_path": str(target), "old_string": "42", "new_string": "43"},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
     assert output["continue"] is False
 
 
@@ -1659,7 +1659,7 @@ rules:
         "tool_input": {"file_path": str(target)},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
 
     # Edit blocked
     data = {
@@ -1668,7 +1668,7 @@ rules:
         "tool_input": {"file_path": str(target), "old_string": "abc", "new_string": "xyz"},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
 
 
 def test_file_content_unreadable_file_blocks(tmp_path: Path) -> None:
@@ -1687,7 +1687,7 @@ rules:
         "tool_input": {"file_path": str(tmp_path / "nonexistent.txt")},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
     assert "Cannot read file" in output["hookSpecificOutput"]["permissionDecisionReason"]
 
 
@@ -1714,7 +1714,7 @@ rules:
         "tool_input": {"file_path": str(target)},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
 
     # JSON with same content: allowed (path doesn't match)
     data = {
@@ -1771,7 +1771,7 @@ rules:
         "tool_input": {"file_path": str(target)},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
     assert output["continue"] is False
 
 
@@ -1855,7 +1855,7 @@ rules:
         "trigger": "auto",
     }
     code, output = capture_output(handle_pre_compact, data, tmp_path)
-    assert code == 2
+    assert code == 0
     assert output["decision"] == "block"
     assert "aws-key" in output["reason"]
     assert "trigger=auto" in output["reason"]
@@ -1983,7 +1983,7 @@ rules:
         "trigger": "manual",
     }
     code, output = capture_output(handle_pre_compact, data, tmp_path)
-    assert code == 2  # still found the secret on line 3
+    assert code == 0  # still found the secret on line 3
 
 
 def test_pre_compact_no_transcript_path_allows(tmp_path: Path) -> None:
@@ -2488,7 +2488,7 @@ rules:
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
     # Even with warn-action, outside-project blocks (refuse to assess)
-    assert code == 2
+    assert code == 0
     assert "outside project boundary" in output["hookSpecificOutput"]["permissionDecisionReason"]
 
 
@@ -2510,7 +2510,7 @@ rules:
         "tool_input": {"file_path": str(link)},
     }
     code, output = capture_output(handle_pre_tool_use, data, tmp_path)
-    assert code == 2
+    assert code == 0
     assert "outside project boundary" in output["hookSpecificOutput"]["permissionDecisionReason"]
 
 
@@ -2709,3 +2709,66 @@ def test_path_matcher_warns_on_resolve_failure(tmp_path: Path) -> None:
     ):
         matcher.scan(["/anywhere/x"], "tool", "Read")
     assert "cannot resolve" in stderr.getvalue()
+
+
+# =============================================================================
+# Halt-field regression guards (Phase-3 migration: exit 2 -> exit 0)
+# =============================================================================
+#
+# Each blocking handler must set BOTH continue:false AND stopReason so CC
+# halts the session, not just the current event. The per-handler block tests
+# above already check that continue:false is set, but they would still pass
+# if stopReason got dropped from the response. These tests pin the
+# stopReason text shape too.
+
+
+def test_pre_tool_use_block_emits_halt_fields(rules_dir: Path) -> None:
+    """PreToolUse block response carries continue:false + stopReason."""
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"content": "AKIAIOSFODNN7EXAMPLE", "file_path": "x.py"},
+    }
+    code, output = capture_output(handle_pre_tool_use, data, rules_dir)
+    assert code == 0
+    assert output["continue"] is False
+    assert output["stopReason"].startswith("Blocked by redaction rules:")
+    assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_user_prompt_submit_block_emits_halt_fields(rules_dir: Path) -> None:
+    """UserPromptSubmit block response carries continue:false + stopReason."""
+    data = {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Use this key: AKIAIOSFODNN7EXAMPLE",
+    }
+    code, output = capture_output(handle_user_prompt_submit, data, rules_dir)
+    assert code == 0
+    assert output["decision"] == "block"
+    assert output["continue"] is False
+    assert output["stopReason"].startswith("Blocked by redaction rules:")
+    assert output["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+
+
+def test_pre_compact_block_emits_halt_fields(tmp_path: Path) -> None:
+    """PreCompact block response carries continue:false + stopReason."""
+    from redaction_hooks.handlers.compact import handle_pre_compact
+
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n  - id: aws\n    pattern: 'AKIA[0-9A-Z]{16}'\n    action: block\n"
+    )
+    transcript = tmp_path / "tx.jsonl"
+    transcript.write_text(
+        json.dumps({"role": "assistant", "content": "leaked AKIAIOSFODNN7EXAMPLE here"}) + "\n"
+    )
+    data = {
+        "hook_event_name": "PreCompact",
+        "transcript_path": str(transcript),
+        "trigger": "manual",
+    }
+    code, output = capture_output(handle_pre_compact, data, tmp_path)
+    assert code == 0
+    assert output["decision"] == "block"
+    assert output["continue"] is False
+    assert output["stopReason"].startswith("Blocked by redaction rules:")
+    assert output["hookSpecificOutput"]["hookEventName"] == "PreCompact"

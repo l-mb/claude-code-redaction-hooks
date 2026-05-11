@@ -217,7 +217,11 @@ def _handle_file_content_failure(
     )
     json.dump(build_block_response(fc_block_reasons), sys.stdout)
     sys.stderr.write(f"Blocked: {'; '.join(fc_block_reasons)}\n")
-    return 2
+    # exit 0 + JSON: CC honors `permissionDecision: "deny"` (denies the call)
+    # AND `continue: false` (halts the session). Returning 2 instead would
+    # silently drop the JSON per docs (only stderr survives), so the session
+    # would continue after the per-call denial.
+    return 0
 
 
 def _emit_block(
@@ -237,7 +241,8 @@ def _emit_block(
     )
     json.dump(build_block_response(block_reasons), sys.stdout)
     sys.stderr.write(f"Blocked: {'; '.join(block_reasons)}\n")
-    return 2
+    # See _handle_file_content_failure for why exit 0 + JSON over exit 2.
+    return 0
 
 
 def _emit_redact(
