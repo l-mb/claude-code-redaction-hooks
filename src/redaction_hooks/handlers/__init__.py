@@ -28,21 +28,25 @@ from typing import Any
 
 from .compact import handle_post_compact, handle_pre_compact
 from .instructions_loaded import handle_instructions_loaded
+from .post_tool_batch import handle_post_tool_batch
 from .post_tool_use import handle_post_tool_use
 from .post_tool_use_failure import handle_post_tool_use_failure
 from .pre_tool_use import handle_pre_tool_use
 from .stop import handle_stop
+from .user_prompt_expansion import handle_user_prompt_expansion
 from .user_prompt_submit import handle_user_prompt_submit
 
 __all__ = [
     "dispatch",
     "handle_instructions_loaded",
     "handle_post_compact",
+    "handle_post_tool_batch",
     "handle_post_tool_use",
     "handle_post_tool_use_failure",
     "handle_pre_compact",
     "handle_pre_tool_use",
     "handle_stop",
+    "handle_user_prompt_expansion",
     "handle_user_prompt_submit",
 ]
 
@@ -53,7 +57,9 @@ _DISPATCH: dict[str, _HandlerFn] = {
     "PreToolUse": handle_pre_tool_use,
     "PostToolUse": handle_post_tool_use,
     "PostToolUseFailure": handle_post_tool_use_failure,
+    "PostToolBatch": handle_post_tool_batch,
     "UserPromptSubmit": handle_user_prompt_submit,
+    "UserPromptExpansion": handle_user_prompt_expansion,
     "PreCompact": handle_pre_compact,
     "PostCompact": handle_post_compact,
     "InstructionsLoaded": handle_instructions_loaded,

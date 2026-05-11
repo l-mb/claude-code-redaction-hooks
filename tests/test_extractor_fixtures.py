@@ -60,7 +60,8 @@ def _load(name: str) -> dict[str, Any]:
         # extractor returned a path of the expected shape.
         ("PreToolUse-Bash.json", None, "<PROJECT>"),
         ("PreToolUse-Read.json", r"^<PROJECT>/[\w.-]+$", None),
-        ("PreToolUse-Grep.json", r"^README\.md$", "rules"),
+        # Grep can receive a relative or absolute path depending on the model -- accept both.
+        ("PreToolUse-Grep.json", r"^(<PROJECT>/)?README\.md$", "rules"),
         ("PreToolUse-Agent.json", None, "list cwd files"),
         ("PreToolUse-Edit.json", r"^<PROJECT>/[\w.-]+$", "redact-verify"),
         ("PreToolUse-Write.json", r"^<PROJECT>/[\w.-]+$", "redact-verify"),
@@ -188,3 +189,21 @@ def test_every_fixture_carries_required_top_level_keys() -> None:
             f"{fixture_path.name} missing session_id -- this is a common-input "
             "field present on every CC hook event; recapture and update"
         )
+
+
+def test_post_tool_batch_fixture_walks_tool_calls() -> None:
+    """If a PostToolBatch fixture is captured, every tool_calls[] entry must
+    have the keys our handler walks (tool_name + tool_response). Skip when
+    the fixture isn't in the corpus yet (Phase 7 may not have captured one)."""
+    fixture_path = FIXTURE_DIR / "PostToolBatch.json"
+    if not fixture_path.exists():
+        pytest.skip("PostToolBatch fixture not yet captured -- see Phase 7 / verify-cc-schema")
+    data = json.loads(fixture_path.read_text())
+    tool_calls = data.get("tool_calls")
+    assert isinstance(tool_calls, list) and tool_calls, (
+        "PostToolBatch fixture must carry a non-empty tool_calls array"
+    )
+    for entry in tool_calls:
+        assert isinstance(entry, dict)
+        assert "tool_name" in entry, "each tool_calls entry must name its tool"
+        assert "tool_response" in entry, "each tool_calls entry must carry tool_response"

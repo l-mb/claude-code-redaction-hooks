@@ -52,7 +52,8 @@ src/redaction_hooks/
 ├── mappings.py  # Persistent original->replacement mappings (flock-locked, atomic save)
 ├── audit.py     # Append-only JSONL audit log of block/redact/warn outcomes
 ├── hooks.py     # Claude Code hook handlers (PreToolUse, PostToolUse, PostToolUseFailure,
-│                # UserPromptSubmit, PreCompact, PostCompact, InstructionsLoaded, Stop, SubagentStop)
+│                # PostToolBatch, UserPromptSubmit, UserPromptExpansion, PreCompact,
+│                # PostCompact, InstructionsLoaded, Stop, SubagentStop)
 └── cli.py       # Subcommand dispatcher
 ```
 

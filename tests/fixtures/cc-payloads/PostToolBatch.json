@@ -1,0 +1,21 @@
+{
+  "session_id": "<SESSION>",
+  "transcript_path": "<HOME>/.claude/projects/-tmp-redact-verify-28suia-x-project/<SESSION>.jsonl",
+  "cwd": "<PROJECT>",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolBatch",
+  "tool_calls": [
+    {
+      "tool_name": "REPL",
+      "tool_input": {
+        "code": "o.readme=cat('README.md')\no.note=cat('note.txt')\no",
+        "description": "Read README.md and note.txt"
+      },
+      "tool_use_id": "toolu_vrtx_01CEuojC6oD84wRYy3mKuyqp",
+      "tool_response": "readme:\n# Sample\n\nSome text mentioning rules so grep has a hit.\n\n\nnote:\nworld-from-redact-verify\n"
+    }
+  ]
+}

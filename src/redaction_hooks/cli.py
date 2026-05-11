@@ -300,7 +300,9 @@ _HOOK_EVENT_MATCHERS: dict[str, str | None] = {
     "PreToolUse": None,
     "PostToolUse": None,
     "PostToolUseFailure": None,
+    "PostToolBatch": None,
     "UserPromptSubmit": None,
+    "UserPromptExpansion": None,  # slash-command path; bypasses UserPromptSubmit
     "PreCompact": None,  # both manual /compact and auto compaction
     "PostCompact": None,
     "InstructionsLoaded": None,

@@ -2772,3 +2772,300 @@ def test_pre_compact_block_emits_halt_fields(tmp_path: Path) -> None:
     assert output["continue"] is False
     assert output["stopReason"].startswith("Blocked by redaction rules:")
     assert output["hookSpecificOutput"]["hookEventName"] == "PreCompact"
+
+
+def test_user_prompt_expansion_block_emits_halt_fields(rules_dir: Path) -> None:
+    """UserPromptExpansion block response carries continue:false + stopReason."""
+    from redaction_hooks.handlers.user_prompt_expansion import handle_user_prompt_expansion
+
+    data = {
+        "hook_event_name": "UserPromptExpansion",
+        "command_name": "leak",
+        "prompt": "expanded prompt with AKIAIOSFODNN7EXAMPLE",
+    }
+    code, output = capture_output(handle_user_prompt_expansion, data, rules_dir)
+    assert code == 0
+    assert output["decision"] == "block"
+    assert output["continue"] is False
+    assert output["stopReason"].startswith("Blocked by redaction rules:")
+    assert output["hookSpecificOutput"]["hookEventName"] == "UserPromptExpansion"
+
+
+def test_post_tool_batch_block_emits_halt_fields(tmp_path: Path) -> None:
+    """PostToolBatch block response carries continue:false + stopReason."""
+    from redaction_hooks.handlers.post_tool_batch import handle_post_tool_batch
+
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n  - id: aws\n    pattern: 'AKIA[0-9A-Z]{16}'\n    action: block\n"
+    )
+    data = {
+        "hook_event_name": "PostToolBatch",
+        "tool_calls": [
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hi"},
+                "tool_use_id": "x",
+                "tool_response": "leaked AKIAIOSFODNN7EXAMPLE in batch output",
+            }
+        ],
+    }
+    code, output = capture_output(handle_post_tool_batch, data, tmp_path)
+    assert code == 0
+    assert output["decision"] == "block"
+    assert output["continue"] is False
+    assert output["stopReason"].startswith("Blocked by redaction rules:")
+    assert output["hookSpecificOutput"]["hookEventName"] == "PostToolBatch"
+
+
+# =============================================================================
+# UserPromptExpansion handler
+# =============================================================================
+
+
+def test_user_prompt_expansion_allows_clean(rules_dir: Path) -> None:
+    """No matches -> continue:true, no decision."""
+    from redaction_hooks.handlers.user_prompt_expansion import handle_user_prompt_expansion
+
+    data = {
+        "hook_event_name": "UserPromptExpansion",
+        "command_name": "noop",
+        "prompt": "this prompt is clean",
+    }
+    code, output = capture_output(handle_user_prompt_expansion, data, rules_dir)
+    assert code == 0
+    assert output == {"continue": True}
+
+
+def test_user_prompt_expansion_skips_target_tool_rule(tmp_path: Path) -> None:
+    """A target=tool rule must NOT fire on UserPromptExpansion (llm-context scan)."""
+    from redaction_hooks.handlers.user_prompt_expansion import handle_user_prompt_expansion
+
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n"
+        "  - id: tool-only\n"
+        "    pattern: 'AKIA[0-9A-Z]{16}'\n"
+        "    action: block\n"
+        "    target: tool\n"
+    )
+    data = {
+        "hook_event_name": "UserPromptExpansion",
+        "command_name": "noop",
+        "prompt": "AKIAIOSFODNN7EXAMPLE in expanded prompt",
+    }
+    code, output = capture_output(handle_user_prompt_expansion, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+
+
+def test_user_prompt_expansion_redact_surfaces_as_skipped(tmp_path: Path) -> None:
+    """Redact action cannot rewrite expansions -> redact-skipped + additionalContext."""
+    from redaction_hooks.handlers.user_prompt_expansion import handle_user_prompt_expansion
+
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n"
+        "  - id: redactme\n"
+        "    pattern: 'SECRET-XXX-[0-9]+'\n"
+        "    action: redact\n"
+        "    replacement: '[REDACTED]'\n"
+        "    target: llm\n"
+    )
+    data = {
+        "hook_event_name": "UserPromptExpansion",
+        "command_name": "noop",
+        "prompt": "expanded with SECRET-XXX-12345",
+    }
+    code, output = capture_output(handle_user_prompt_expansion, data, tmp_path)
+    assert code == 0
+    assert output["continue"] is True
+    assert "additionalContext" in output["hookSpecificOutput"]
+    assert "redactme" in output["hookSpecificOutput"]["additionalContext"]
+
+
+def test_user_prompt_expansion_missing_prompt_audits_drift(tmp_path: Path) -> None:
+    """Missing `prompt` key with command_name present -> drift audit entry."""
+    from redaction_hooks.handlers.user_prompt_expansion import handle_user_prompt_expansion
+
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n  - id: r\n    pattern: 'X'\n    action: block\n    target: llm\n"
+    )
+    data = {
+        "hook_event_name": "UserPromptExpansion",
+        "command_name": "skill-without-prompt",
+    }
+    code, output = capture_output(handle_user_prompt_expansion, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+    audit = (tmp_path / ".claude" / "redaction_audit.log").read_text()
+    assert "missing-key" in audit
+    assert "UserPromptExpansion" in audit
+
+
+# =============================================================================
+# PostToolBatch handler
+# =============================================================================
+
+
+def test_post_tool_batch_allows_clean(tmp_path: Path) -> None:
+    """No matches -> continue:true, no decision."""
+    from redaction_hooks.handlers.post_tool_batch import handle_post_tool_batch
+
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n  - id: aws\n    pattern: 'AKIA[0-9A-Z]{16}'\n    action: block\n"
+    )
+    data = {
+        "hook_event_name": "PostToolBatch",
+        "tool_calls": [
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hi"},
+                "tool_response": "hi\n",
+            }
+        ],
+    }
+    code, output = capture_output(handle_post_tool_batch, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+
+
+def test_post_tool_batch_walks_content_block_array(tmp_path: Path) -> None:
+    """tool_response can be a content-block array (not just a string)."""
+    from redaction_hooks.handlers.post_tool_batch import handle_post_tool_batch
+
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n  - id: aws\n    pattern: 'AKIA[0-9A-Z]{16}'\n    action: block\n"
+    )
+    data = {
+        "hook_event_name": "PostToolBatch",
+        "tool_calls": [
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo a"},
+                "tool_response": [
+                    {"type": "text", "text": "ok"},
+                    {"type": "text", "text": "leaked AKIAIOSFODNN7EXAMPLE"},
+                ],
+            }
+        ],
+    }
+    code, output = capture_output(handle_post_tool_batch, data, tmp_path)
+    assert code == 0
+    assert output["decision"] == "block"
+    assert output["continue"] is False
+
+
+def test_post_tool_batch_skips_target_llm_rule(tmp_path: Path) -> None:
+    """A target=llm rule must NOT fire on PostToolBatch (tool-context scan)."""
+    from redaction_hooks.handlers.post_tool_batch import handle_post_tool_batch
+
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n"
+        "  - id: llm-only\n"
+        "    pattern: 'AKIA[0-9A-Z]{16}'\n"
+        "    action: block\n"
+        "    target: llm\n"
+    )
+    data = {
+        "hook_event_name": "PostToolBatch",
+        "tool_calls": [
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo a"},
+                "tool_response": "AKIAIOSFODNN7EXAMPLE in tool output",
+            }
+        ],
+    }
+    code, output = capture_output(handle_post_tool_batch, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+
+
+def test_post_tool_batch_redact_surfaces_as_skipped(tmp_path: Path) -> None:
+    """Redact cannot rewrite already-shipped batch output -> redact-skipped audit."""
+    from redaction_hooks.handlers.post_tool_batch import handle_post_tool_batch
+
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n"
+        "  - id: redactme\n"
+        "    pattern: 'SECRET-XXX-[0-9]+'\n"
+        "    action: redact\n"
+        "    replacement: '[REDACTED]'\n"
+        "    target: tool\n"
+    )
+    data = {
+        "hook_event_name": "PostToolBatch",
+        "tool_calls": [
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo SECRET-XXX-123"},
+                "tool_response": "SECRET-XXX-12345 in output",
+            }
+        ],
+    }
+    code, output = capture_output(handle_post_tool_batch, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+    audit = (tmp_path / ".claude" / "redaction_audit.log").read_text()
+    assert "redact-skipped" in audit
+
+
+def test_post_tool_batch_missing_tool_calls_audits_drift(tmp_path: Path) -> None:
+    """Missing tool_calls with other keys present -> drift audit."""
+    from redaction_hooks.handlers.post_tool_batch import handle_post_tool_batch
+
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n  - id: r\n    pattern: 'X'\n    action: block\n    target: tool\n"
+    )
+    data = {
+        "hook_event_name": "PostToolBatch",
+        "session_id": "fake",
+    }
+    code, output = capture_output(handle_post_tool_batch, data, tmp_path)
+    assert code == 0
+    assert output == {"continue": True}
+    audit = (tmp_path / ".claude" / "redaction_audit.log").read_text()
+    assert "missing-key" in audit
+
+
+def test_post_tool_batch_dispatches_via_run_hook(tmp_path: Path) -> None:
+    """Sanity check that the dispatch table routes PostToolBatch to the handler."""
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n  - id: aws\n    pattern: 'AKIA[0-9A-Z]{16}'\n    action: block\n"
+    )
+    data = {
+        "hook_event_name": "PostToolBatch",
+        "tool_calls": [
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo a"},
+                "tool_response": "AKIAIOSFODNN7EXAMPLE",
+            }
+        ],
+    }
+    stdin = io.StringIO(json.dumps(data))
+    stdout = io.StringIO()
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+        code = run_hook(tmp_path)
+    assert code == 0
+    output = json.loads(stdout.getvalue())
+    assert output["decision"] == "block"
+    assert output["continue"] is False
+
+
+def test_user_prompt_expansion_dispatches_via_run_hook(tmp_path: Path) -> None:
+    """Sanity check that the dispatch table routes UserPromptExpansion."""
+    (tmp_path / ".redaction_rules").write_text(
+        "rules:\n  - id: aws\n    pattern: 'AKIA[0-9A-Z]{16}'\n    action: block\n    target: llm\n"
+    )
+    data = {
+        "hook_event_name": "UserPromptExpansion",
+        "command_name": "leak",
+        "prompt": "expanded with AKIAIOSFODNN7EXAMPLE",
+    }
+    stdin = io.StringIO(json.dumps(data))
+    stdout = io.StringIO()
+    with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+        code = run_hook(tmp_path)
+    assert code == 0
+    output = json.loads(stdout.getvalue())
+    assert output["decision"] == "block"
+    assert output["continue"] is False

@@ -121,6 +121,45 @@ SCENARIOS: tuple[Scenario, ...] = (
         ),
         max_turns=3,
     ),
+    # PreToolUse block scenario - exercises the halt path live so the
+    # captured fixture covers the deny + continue:false JSON shape.
+    #
+    # Empirical halt finding (CC 2.1.138, 2026-05-11): exit-0 +
+    # `continue: false` from PreToolUse halts the session BETWEEN turns
+    # (the next tool call never fires), but does NOT halt within a
+    # parallel tool batch (all calls in a batch fire their PreToolUse
+    # hook before any halt is processed). Acceptable for redaction:
+    # every call in the batch still gets `permissionDecision: deny`, so
+    # no leak fires; the session halts before the next batch.
+    Scenario(
+        "block-pre-tool-use",
+        (
+            "Use the Write tool to create file `marker.txt` with the single line "
+            "`redact-verify-block-marker-ABCD1234`. Reply DONE."
+        ),
+        max_turns=2,
+    ),
+    # NOTE: a UserPromptExpansion scenario was attempted (CC 2.1.138,
+    # 2026-05-11) by seeding a `.claude/skills/redact-verify-echo.md`
+    # skill and prompting `/redact-verify-echo ...`. CC's headless `-p`
+    # mode does not expand user-typed slash commands the same way as the
+    # interactive REPL, so no UserPromptExpansion event fires. The
+    # handler still ships and is unit-tested via synthetic payloads;
+    # the corpus example is deferred until the harness supports it.
+    #
+    # PostToolBatch fires after a parallel tool batch resolves. Earlier
+    # halt-empirical experiments confirmed CC 2.1.138 does run tools in
+    # parallel when the prompt encourages it. If the model issues calls
+    # sequentially anyway, the fixture won't land -- handler still ships.
+    Scenario(
+        "post-tool-batch-parallel",
+        (
+            "Use the Read tool to read README.md AND the Read tool to read "
+            "note.txt -- issue both Read calls in the SAME response so they "
+            "execute in parallel. Reply DONE after both come back."
+        ),
+        max_turns=3,
+    ),
 )
 
 
@@ -177,6 +216,14 @@ def setup_tmp_project(parent: Path) -> Path:
         "    pattern: 'redact-verify-canary-XYZ'\n"
         "    action: warn\n"
         "    description: Harmless canary so the hook dispatcher exercises every event.\n"
+        "  - id: harness-block-marker\n"
+        "    pattern: 'redact-verify-block-marker-[A-Z0-9]{8}'\n"
+        "    action: block\n"
+        "    target: tool\n"
+        "    description: Drives the block-pre-tool-use scenario for halt verification.\n"
+        "    # target=tool keeps UserPromptSubmit from blocking the harness prompt\n"
+        "    # itself (which mentions the pattern). An innocuous marker (not a\n"
+        "    # real secret pattern) keeps the model from refusing the write.\n"
     )
     settings = {
         "hooks": {
@@ -292,6 +339,8 @@ _SUBAGENT_CONTEXT_KEYS = frozenset({"agent_id", "agent_type"})
 # `last_assistant_message` and falls back to `transcript_path`).
 _REQUIRED_KEYS_BY_EVENT: dict[str, tuple[str, ...]] = {
     "UserPromptSubmit": ("prompt",),
+    "UserPromptExpansion": ("prompt",),
+    "PostToolBatch": ("tool_calls",),
     "InstructionsLoaded": ("file_path",),
     "PreCompact": ("transcript_path",),
     "PostCompact": ("transcript_path",),
