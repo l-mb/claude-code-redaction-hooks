@@ -12,18 +12,28 @@ What each hook event can do is determined by Claude Code:
 - **redact** — rewrite the payload in place: PreToolUse swaps secrets in the tool input before it executes; PostToolUse swaps secrets in `tool_response` before the model sees it. The mapping file makes the same secret get the same replacement across calls.
 - **observe** — scan and audit only. The hook cannot stop or rewrite anything because Claude Code provides no decision channel for that event; matches are written to the audit log and stderr so an operator can react after the fact. Rules with `action: redact` on observe-only events surface as `redact-skipped` in the audit and a stderr warning.
 
-| Hook                | block | redact                          | observe |
-|---------------------|-------|---------------------------------|---------|
-| PreToolUse          | Y     | Y (tool input rewritten)        | Y       |
-| PostToolUse         | Y     | Y (tool output rewritten)       | Y       |
-| PostToolUseFailure  | N     | N                               | Y       |
-| UserPromptSubmit    | Y     | N — warns + `additionalContext` | Y       |
-| PreCompact          | Y     | N — warns only (no rewrite)     | Y       |
-| PostCompact         | N     | N                               | Y       |
-| InstructionsLoaded  | N     | N                               | Y       |
-| Stop / SubagentStop | (N)   | N                               | Y       |
+| Hook                  | block | redact                          | observe |
+|-----------------------|-------|---------------------------------|---------|
+| PreToolUse            | Y     | Y (tool input rewritten)        | Y       |
+| PostToolUse           | Y     | Y (tool output rewritten)       | Y       |
+| PostToolUseFailure    | N     | N                               | Y       |
+| PostToolBatch         | Y     | N — `redact-skipped` audit      | Y       |
+| UserPromptSubmit      | Y     | N — warns + `additionalContext` | Y       |
+| UserPromptExpansion   | Y     | N — warns + `additionalContext` | Y       |
+| PreCompact            | Y     | N — warns only (no rewrite)     | Y       |
+| PostCompact           | N     | N                               | Y       |
+| InstructionsLoaded    | N     | N                               | Y       |
+| Stop / SubagentStop   | (N)   | N                               | Y       |
+
+`PostToolBatch` fires after a parallel tool batch resolves; per-entry `tool_response` outputs have already been shipped to context, so `redact`-action matches surface as a `redact-skipped` audit entry rather than rewriting in place. `UserPromptExpansion` covers the `/skillname args` slash-command path that bypasses both `UserPromptSubmit` and `PreToolUse`; CC docs do not provide an `updatedInput` channel, so redact-action matches use the same `additionalContext` warning as `UserPromptSubmit`.
 
 Stop/SubagentStop *can* return `decision:"block"`, but doing so just forces Claude to keep talking; it does not unsend the message that already leaked. We treat them as observe-only.
+
+### Session halt on block
+
+Hook events that support a halt path (`PreToolUse`, `PostToolBatch`, `UserPromptSubmit`, `UserPromptExpansion`, `PreCompact`) emit `continue: false` + `stopReason` alongside their deny/block decision. CC honours this by halting subsequent turns rather than letting the model retry. `PostToolUse` intentionally stays on the exit-2 path: the tool has already executed by the time it fires, so halting only delays the next turn — it cannot un-ship the leaked content.
+
+> **Caveat — parallel tool batches.** Within a single parallel tool batch, every call's `PreToolUse` still fires (and is individually denied via `permissionDecision: deny`) before the halt takes effect on the *next* batch. No leak fires — every call in the batch is blocked — but the halt is not instantaneous within a batch. Verified empirically on CC 2.1.138.
 
 Tool output that Claude Code spills to disk (>50K chars) is scanned via the `file_path` referenced in the spill stub. Matches against `block` rules still block; `redact` matches surface as a `redact-skipped` audit entry — the spill file is not rewritten because there's no contract that Claude Code re-reads it after the hook returns.
 
@@ -195,44 +205,6 @@ The harness needs `claude` on `PATH` and a working CC API session. Default scena
 
 For ad-hoc payload inspection without the full harness: `REDACT_HOOK_DUMP_DIR=/tmp/cc-dump` causes `redact hook` to dump the raw stdin payload before processing it, so any installed CC session populates the directory automatically.
 
-## 0.3.0 release notes
+## Release notes
 
-- **Behaviour fix**: every handler that detects a `redact`-action match but
-  cannot rewrite the payload now audits as `redact-skipped` (matching the
-  README contract). Affects `UserPromptSubmit`, `PostToolUse` (non-dict /
-  no-change branches), `PostToolUseFailure`, `PreCompact`, `PostCompact`,
-  `InstructionsLoaded`, `Stop`, `SubagentStop`. The `PostToolUse` success
-  path that produces a real `updatedToolOutput` still audits as `redact`.
-  Operator queries against `redact audit since 7d | jq 'select(.action=="redact")'`
-  now reliably reflect "rewrite happened" rather than "rule matched somewhere".
-- **Security fix**: `path_pattern` rules for `Bash` now see paths inside
-  `bash -c "<inner>"` / `sh -c '<inner>'` / `dash`/`zsh`/`ksh` wrappers
-  (incl. `env VAR=x bash -c …` and `-c=<inner>` forms). Previously the
-  inner command landed as a single shlex token and silently bypassed the
-  matcher.
-- **CLI**: `redact secret add` now exposes `--action {block,redact,warn}`,
-  `--target {llm,tool,both}`, `--hash-extractor REGEX`, and `--replacement
-  STR`. Hashed redact-style rules no longer require hand-editing.
-- **CLI**: `redact hook` defaults to `Path.cwd()` when `$CLAUDE_PROJECT_DIR`
-  is unset (previously fell back to the user-global audit log, which
-  `redact audit tail` doesn't read by default). Manual hook invocations
-  from a project shell now show up in `redact audit tail` as expected.
-- **Docs**: README documents the threat model for hashed rules
-  (brute-forceable for low-entropy inputs) and warns that `redact secret
-  add` re-serialises the rules file via `yaml.dump` (drops comments).
-- **Internal**: `hooks.py` (1530 lines) split into a `handlers/` package
-  plus `extractors.py` and `drift.py`. `handle_pre_tool_use` (was CCN 59)
-  and `iter_output_fields` (was CCN 42) are decomposed; no behaviour
-  change. Test imports updated; the public API reachable via
-  `redaction_hooks.run_hook` is unchanged.
-- `__version__` is now sourced from `importlib.metadata` so `pyproject.toml`
-  is the single source of truth.
-
-## 0.2.0 release notes
-
-- **Behaviour fix**: PreToolUse and PostToolUse hooks no longer ship with a hard-coded tool matcher. Earlier versions installed `matcher: "Write|Edit|Bash"` (PreToolUse) and `matcher: "Read|Bash|Grep|Glob|WebFetch"` (PostToolUse), which silently bypassed `Read`, `MultiEdit`, `WebSearch`, `Task`/Agent, and MCP `mcp__*__*` tools. Rules with `tool: Read` or `file_tools: read` now fire as the README has always documented. Re-run `redact claude-setup` (or `--uninstall && claude-setup`) to refresh existing installs.
-- **New hook events**: `PostToolUseFailure`, `PostCompact`, `Stop`, `SubagentStop`, and `InstructionsLoaded` are scanned (warn-only — see Limitations). They detect leaks in failed-tool errors, post-compaction summaries, the last assistant message, and loaded `CLAUDE.md` / `.claude/rules/*.md` files.
-- **Spilled tool output**: when Claude Code persists a tool result >50K chars to disk, the redaction hook now reads the spill file and applies block rules; redact rules surface a `redact-skipped` audit entry rather than silently passing.
-- **`additionalContext`** is now sent on `PreToolUse` redacts and `UserPromptSubmit` redacts so the model knows a rule fired (rule IDs only, never matched text).
-- **`tool_use_id`** is recorded in audit entries for pre/post correlation.
-- **`$CLAUDE_PROJECT_DIR`** is honoured by `redact hook` when set, anchoring rules and audit log to the project root regardless of the hook process's cwd.
+See [CHANGELOG.md](CHANGELOG.md) for per-version release notes.
