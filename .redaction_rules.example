@@ -1,5 +1,8 @@
 rules:
-  # Block AWS credentials
+  # =====================================================================
+  # SECRETS & CREDENTIALS  (action: block)
+  # =====================================================================
+
   - id: aws-access-key
     pattern: 'AKIA[0-9A-Z]{16}'
     action: block
@@ -10,7 +13,6 @@ rules:
     action: block
     description: AWS Secret Access Key
 
-  # Block common API keys
   - id: openai-key
     pattern: 'sk-[a-zA-Z0-9]{32,}'
     action: block
@@ -21,29 +23,105 @@ rules:
     action: block
     description: GitHub Personal Access Token
 
+  - id: slack-token
+    pattern: 'xox[baprs]-[A-Za-z0-9-]{10,}'
+    action: block
+    description: Slack token (bot/app/refresh/user)
+
+  - id: stripe-key
+    pattern: 'sk_(?:live|test)_[0-9a-zA-Z]{24,}'
+    action: block
+    description: Stripe secret key
+
+  - id: jwt-token
+    pattern: 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'
+    action: block
+    description: JSON Web Token
+
+  - id: ssh-private-key
+    pattern: '-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY-----'
+    action: block
+    description: SSH/PGP private key marker
+
+  - id: db-connection-string
+    pattern: '(?:postgres|postgresql|mysql|mongodb|redis)://[^:\s]+:[^@\s]+@'
+    action: block
+    description: Database URL with embedded password
+
+  - id: bearer-token
+    pattern: '(?i)bearer\s+[A-Za-z0-9._~+/=-]{20,}'
+    action: block
+    description: HTTP Bearer authorization token
+
   - id: static-string
     pattern: 'MAGICSTRING'
     action: block
     is_regex: false
-    description: Static string to block example
+    description: Static (non-regex) literal to block
 
-  # Redact email addresses in LLM prompts
+  # =====================================================================
+  # HASHED SECRETS  (pattern is SHA-256 of the secret; rules file stays opaque)
+  # Add new ones with:  echo "YourSecret" | redact secret add --id my-id
+  # =====================================================================
+
+  - id: internal-codename
+    pattern: '0fb537aad45e82be8c1b9503354215cbe585859f1cc3882e5e188d2c91ff9198'
+    hashed: true
+    hash_extractor: '\b\w{4,}\b'
+    action: block
+    description: Confidential project codename (sha256 of "PROJECTHELIOS")
+
+  # =====================================================================
+  # PII REDACTION  (action: redact -- payload is rewritten in place)
+  # Same input always maps to the same replacement (mappings file).
+  # `replacement:` may be `ip` / `email` / `hostname` (deterministic fakes)
+  # or any literal string.
+  # =====================================================================
+
   - id: email-pii
     pattern: '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     action: redact
     replacement: email
     target: llm
-    description: Email addresses
+    description: Email addresses in user prompts
 
-  # Redact IP addresses
   - id: ip-address
     pattern: '\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
     action: redact
     replacement: ip
     target: llm
-    description: IPv4 addresses
+    description: IPv4 addresses in user prompts
 
-  # Block dangerous git flags (Bash commands only)
+  # `target: tool` -- only fires on tool input/output, not user prompts.
+  # Use when the user typing the value is fine but the LLM seeing it in a
+  # tool result is not (e.g. operator runs `ssh srv-prod-7.internal` and
+  # the banner shouldn't leak the real hostname into context).
+  - id: internal-hostname
+    pattern: '(?i)\b(?:srv|host|node)-[a-z0-9-]+\.internal\b'
+    action: redact
+    replacement: hostname
+    target: tool
+    description: Internal hostnames in tool output
+
+  # Literal-string replacement (instead of `email`/`ip`/`hostname` keyword).
+  - id: phone-number
+    pattern: '\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'
+    action: redact
+    replacement: '[PHONE]'
+    target: llm
+    description: NANP phone numbers
+
+  - id: ssn
+    pattern: '\b\d{3}-\d{2}-\d{4}\b'
+    action: redact
+    replacement: '[SSN]'
+    target: llm
+    description: US Social Security Numbers
+
+  # =====================================================================
+  # TOOL-SCOPED RULES  (`tool:` filters to one Claude Code tool name)
+  # =====================================================================
+
   - id: git-no-verify
     pattern: '--no-verify'
     action: block
@@ -56,7 +134,49 @@ rules:
     tool: Bash
     description: git push requires mandatory human review
 
-  # Path-based rules (block access to certain files/directories)
+  # `tool: Edit` (also: MultiEdit) -- restrict in-place edits.
+  - id: block-lockfile-edit
+    path_pattern: '**/*.lock'
+    action: block
+    tool: Edit
+    description: Block editing dependency lock files
+
+  # `tool: Grep` -- pattern is matched against the Grep query string itself,
+  # discouraging credential hunting in the repo.
+  - id: grep-credentials
+    pattern: '(?i)(password|api[_-]?key|secret)\s*[:=]'
+    action: warn
+    tool: Grep
+    description: Warn when grepping for credential-shaped strings
+
+  # `tool: WebFetch` -- block requests to cloud instance metadata services
+  # (a classic SSRF / IMDSv1 leak vector).
+  - id: block-cloud-metadata
+    pattern: '169\.254\.169\.254|metadata\.google\.internal|metadata\.azure\.com'
+    action: block
+    tool: WebFetch
+    description: Block fetching cloud instance metadata endpoints
+
+  # `tool: Task` (also: Agent) -- scan subagent prompts for prompt-injection
+  # phrasing before dispatch.
+  - id: block-prompt-injection
+    pattern: '(?i)ignore (?:all |previous |prior )?(?:instructions|prompts|rules)'
+    action: block
+    tool: Task
+    description: Block obvious prompt-injection phrasing in subagent prompts
+
+  # MCP tools use `mcp__<server>__<tool>` naming. Filter just like any other
+  # tool name -- here, block messages sent through a Slack MCP server.
+  - id: block-mcp-slack-send
+    tool: mcp__slack__send_message
+    pattern: '.+'
+    action: block
+    description: Block Slack MCP send (require human approval out-of-band)
+
+  # =====================================================================
+  # PATH-BASED RULES  (block based on the file path the tool touches)
+  # =====================================================================
+
   - id: block-env-read
     path_pattern: '*.env'
     action: block
@@ -74,7 +194,10 @@ rules:
     tool: Bash
     description: Block accessing system password file
 
-  # Warn action (logs but allows - for files that may be needed occasionally)
+  # =====================================================================
+  # WARN RULES  (logged to audit + stderr, but allowed)
+  # =====================================================================
+
   - id: warn-tmp-write
     path_pattern: '/tmp/*'
     action: warn
@@ -86,7 +209,10 @@ rules:
     action: warn
     description: Accessing home directory dotfiles
 
-  # Combined path + pattern rules (both must match)
+  # =====================================================================
+  # COMBINED  path_pattern + pattern  (BOTH must match)
+  # =====================================================================
+
   - id: aws-key-in-env
     path_pattern: '*.env'
     pattern: 'AKIA[0-9A-Z]{16}'
@@ -101,7 +227,12 @@ rules:
     tool: Bash
     description: Block recursive rm on home directories
 
-  # File content-based rules (checks first 100 lines of target file)
+  # =====================================================================
+  # FILE-CONTENT RULES  (scan first 100 lines of the target file)
+  # `file_tools:` is `read` / `write` / `rw`.
+  # Note: `file_content_pattern` does not support `action: redact`.
+  # =====================================================================
+
   - id: block-proprietary-read
     file_content_pattern: 'PROPRIETARY AND CONFIDENTIAL'
     file_tools: read
@@ -120,18 +251,13 @@ rules:
     action: block
     description: Block editing auto-generated files
 
-  # Combined path + file content rules
+  # =====================================================================
+  # COMBINED  path_pattern + file_content_pattern
+  # =====================================================================
+
   - id: block-sensitive-config
     path_pattern: '*.yaml'
     file_content_pattern: 'kind:\s*Secret'
     file_tools: rw
     action: block
-    description: Block access to Kubernetes secrets
-
-  # Example hashed secret (add with: echo "YourSecret" | redact secret add --id my-secret)
-  # - id: my-secret
-  #   pattern: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-  #   hashed: true
-  #   hash_extractor: '\b\w{4,}\b'
-  #   action: block
-  #   description: Confidential project name
+    description: Block access to Kubernetes Secret manifests
