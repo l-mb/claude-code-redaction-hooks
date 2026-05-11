@@ -160,6 +160,22 @@ SCENARIOS: tuple[Scenario, ...] = (
         ),
         max_turns=3,
     ),
+    # @-mention scenario: probes whether CC's interactive `@filename`
+    # expansion fires in headless `-p` mode and, if so, which hook event
+    # carries the inlined file body. `atmention.txt` holds a distinctive
+    # canary. Run with `--keep-tmp` (the dump dir is removed otherwise),
+    # then `grep -l atmention-canary <tmp>/dump/*.json` shows which
+    # capture(s) contain it. Three possible outcomes:
+    #   - canary in UserPromptSubmit.prompt -> CC inlines, handler covers
+    #   - canary in PreToolUse/PostToolUse Read -> CC issues a synthetic
+    #     Read, handlers cover it
+    #   - canary nowhere -> @-expansion bypasses every hook, leak surface
+    #     is real and only fixable upstream in CC
+    Scenario(
+        "atmention-file",
+        "What is the canary phrase in @atmention.txt? Reply with just that phrase.",
+        max_turns=2,
+    ),
 )
 
 
@@ -239,6 +255,10 @@ def setup_tmp_project(parent: Path) -> Path:
     (proj / "multi.txt").write_text(
         "alpha-from-redact-verify\nbeta-from-redact-verify\n",
     )
+    # Distinctive canary for the atmention-file scenario. Greppable across
+    # the payload dump dir to determine which hook event (if any) carries
+    # the inlined body of an `@filename` reference.
+    (proj / "atmention.txt").write_text("atmention-canary-redact-verify-PHRASE\n")
     return proj
 
 

@@ -1,3 +1,19 @@
+# WARNING
+
+Due to limitations in Claude Code, the hook mechanism is very fragile. The documentation does not match the actual behaviour. Behaviour is inconsistent between hooks. Hooks change behaviour between versions with no real release note entry. The model will try to work around operations that hooks deny.
+
+Since Claude Code is proprietary, the actual behaviour can't easily be checked, and the model will occasionally assume capturing `claude`'s actual behaviour (to capture the actual JSON given to hooks) constitutes a forbidden reverse engineering attempt; I assume no responsibility for your subscription getting locked.
+
+Not all behaviour in Claude Code can be hooked into.
+
+At best, it will help you get notified that something leaked.
+
+**DO NOT** rely on this tool to actually offer meaningful protection.
+
+Keep *any* agent harness, but especially **this** harness, far away from access to any unsanitized information you'd not also happily upload to a public Internet archive.
+
+This has been an enlightening experiment for me about where we are at with `claude`. But some experimental results serve as warnings.
+
 # Claude Code Redaction Hooks
 
 Hooks for Claude Code to block or redact secrets/PII before LLM submission or tool execution, redact tool output before it returns, and warn on matches in transcripts (compaction, stop, subagent stop), failed tool calls, and loaded memory files.
@@ -53,6 +69,20 @@ In short:
 - **`PreToolUse` is the only hook that can stop a tool from reaching the network.** If a tool's first action would leak (e.g. `curl` with a secret in the URL, an MCP call carrying customer data), only `PreToolUse` can prevent it.
 - For the **LLM upload channel**, the effective prevention points are `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `UserPromptExpansion`, and `PreCompact`. On the redact side, `UserPromptSubmit` / `UserPromptExpansion` / `PreCompact` warn only — Claude Code provides no rewrite channel for those events.
 - `PostToolUseFailure`, `PostToolBatch`, `PostCompact`, `InstructionsLoaded`, `Stop`, and `SubagentStop` are **audit-only with respect to egress**: by the time they fire, the matched payload has already shipped (or will ship without us being able to intervene). Their value is post-hoc alerting, not prevention.
+
+### `@`-mention expansion bypasses every hook
+
+When a user types `@filename` in a prompt, Claude Code reads the file and inlines its contents into the model context **outside the hook pipeline**. Verified empirically on CC 2.1.138 via the `atmention-file` scenario in `redact verify-cc-schema`: the file body never appears in any inbound payload — not `UserPromptSubmit.prompt` (which carries only the literal `@filename` token), not a synthetic `PreToolUse` / `PostToolUse:Read`, not `UserPromptExpansion`, not `InstructionsLoaded`. The hook only sees the content post-hoc in `Stop.last_assistant_message` if the model echoes it back. By then the leak has already happened.
+
+Mitigation: scan for the literal `@<path>` token at `UserPromptSubmit` and block, forcing the user to issue an explicit `Read` tool call (which `PreToolUse` / `PostToolUse` *can* intercept and rewrite):
+
+```yaml
+- id: refuse-at-mention
+  pattern: '@[\w./-]+\.\w+'
+  action: block
+  target: llm
+  description: '@-mention expansions bypass hooks; require explicit Read tool use.'
+```
 
 ### Session halt on block
 
