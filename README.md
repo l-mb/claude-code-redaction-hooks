@@ -29,6 +29,31 @@ What each hook event can do is determined by Claude Code:
 
 Stop/SubagentStop *can* return `decision:"block"`, but doing so just forces Claude to keep talking; it does not unsend the message that already leaked. We treat them as observe-only.
 
+### What block/redact actually prevents from leaving the machine
+
+The table above lists which *action* each hook supports. Supporting `block` does not by itself mean blocking keeps data on the local machine — for some events, the data has already left by the time the hook fires.
+
+Two remote endpoints can leak: the **LLM API** (Anthropic uploads every prompt, tool result, and compaction summary), and a **tool's own outbound network calls** (`WebFetch`, `WebSearch`, MCP servers, `Bash` running `curl`/`ssh`/`gh`/etc.). A hook can only prevent egress on a channel it sits in front of.
+
+| Hook                  | Stops the tool's network call         | Stops upload to the LLM                              |
+|-----------------------|---------------------------------------|------------------------------------------------------|
+| PreToolUse            | block, redact (input rewritten)       | block (no result produced), redact                   |
+| PostToolUse           | — tool already ran                    | block (result hidden), redact (response rewritten)   |
+| PostToolUseFailure    | — tool already ran                    | — observe-only                                       |
+| PostToolBatch         | — tool already ran                    | — outputs already shipped to context                 |
+| UserPromptSubmit      | n/a                                   | block; redact warns only                             |
+| UserPromptExpansion   | n/a                                   | block; redact warns only                             |
+| PreCompact            | n/a                                   | block (summary request aborted); redact warns only   |
+| PostCompact           | n/a                                   | — round-trip already complete                        |
+| InstructionsLoaded    | n/a                                   | — no decision channel; file queued for next turn     |
+| Stop / SubagentStop   | n/a                                   | — final message already sent                         |
+
+In short:
+
+- **`PreToolUse` is the only hook that can stop a tool from reaching the network.** If a tool's first action would leak (e.g. `curl` with a secret in the URL, an MCP call carrying customer data), only `PreToolUse` can prevent it.
+- For the **LLM upload channel**, the effective prevention points are `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `UserPromptExpansion`, and `PreCompact`. On the redact side, `UserPromptSubmit` / `UserPromptExpansion` / `PreCompact` warn only — Claude Code provides no rewrite channel for those events.
+- `PostToolUseFailure`, `PostToolBatch`, `PostCompact`, `InstructionsLoaded`, `Stop`, and `SubagentStop` are **audit-only with respect to egress**: by the time they fire, the matched payload has already shipped (or will ship without us being able to intervene). Their value is post-hoc alerting, not prevention.
+
 ### Session halt on block
 
 Hook events that support a halt path (`PreToolUse`, `PostToolBatch`, `UserPromptSubmit`, `UserPromptExpansion`, `PreCompact`) emit `continue: false` + `stopReason` alongside their deny/block decision. CC honours this by halting subsequent turns rather than letting the model retry. `PostToolUse` intentionally stays on the exit-2 path: the tool has already executed by the time it fires, so halting only delays the next turn — it cannot un-ship the leaked content.
