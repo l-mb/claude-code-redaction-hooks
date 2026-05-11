@@ -80,15 +80,45 @@ def emit_warnings(warn_reasons: list[str]) -> None:
 
 
 def build_block_response(reasons: list[str]) -> dict[str, Any]:
-    """Build a blocking response for PreToolUse."""
+    """Build a blocking response for PreToolUse.
+
+    Returns the rich JSON CC honors on exit code 0 (per docs): the
+    `permissionDecision: "deny"` denies the tool call AND `continue: false`
+    halts the rest of the session. Empirically (CC 2.1.138): halt is honored
+    between turns; within a parallel tool batch, every call's PreToolUse
+    still fires (and is individually denied) before the halt takes effect on
+    the next batch.
+    """
+    joined = "; ".join(reasons)
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": "; ".join(reasons),
+            "permissionDecisionReason": joined,
         },
         "continue": False,
-        "stopReason": f"Blocked by redaction rules: {'; '.join(reasons)}",
+        "stopReason": f"Blocked by redaction rules: {joined}",
+    }
+
+
+def build_decision_block_response(event_name: str, reasons: list[str]) -> dict[str, Any]:
+    """Build a top-level `decision: "block"` response with halt fields.
+
+    Used by events whose decision pattern is top-level `decision: "block"`:
+    UserPromptSubmit, UserPromptExpansion, PostToolBatch, PreCompact (per
+    docs https://code.claude.com/docs/en/hooks). Always sets
+    `continue: false` + `stopReason` so any blocking match halts the whole
+    session, not just the current event -- a blocked secret-leak pattern
+    means the user needs to re-engage, not silently retry.
+    """
+    joined = "; ".join(reasons)
+    blocked = f"Blocked by redaction rules: {joined}"
+    return {
+        "decision": "block",
+        "reason": blocked,
+        "continue": False,
+        "stopReason": blocked,
+        "hookSpecificOutput": {"hookEventName": event_name},
     }
 
 
